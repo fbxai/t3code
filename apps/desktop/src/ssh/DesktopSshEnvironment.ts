@@ -2,10 +2,12 @@ import type {
   DesktopDiscoveredSshHost,
   DesktopSshEnvironmentBootstrap,
   DesktopSshEnvironmentTarget,
+  DesktopSshEnvironmentLogs,
 } from "@t3tools/contracts";
 import * as NetService from "@t3tools/shared/Net";
 import * as SshAuth from "@t3tools/ssh/auth";
-import { resolveSshTarget } from "@t3tools/ssh/command";
+import { resolveSshTarget, targetConnectionKey } from "@t3tools/ssh/command";
+import { redactConnectionLog } from "@t3tools/shared/connectionLogs";
 import { discoverSshHosts } from "@t3tools/ssh/config";
 import {
   SshCommandError,
@@ -18,15 +20,20 @@ import {
 } from "@t3tools/ssh/errors";
 import * as SshTunnel from "@t3tools/ssh/tunnel";
 import * as Context from "effect/Context";
+import * as Clock from "effect/Clock";
+import * as Cause from "effect/Cause";
 import type * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
+import * as References from "effect/References";
 import * as Path from "effect/Path";
 import * as HttpClient from "effect/http/HttpClient";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import * as DesktopSshPasswordPrompts from "./DesktopSshPasswordPrompts.ts";
+import { createSshLogCache } from "./SshLogCache.ts";
 
 export type DesktopSshEnvironmentRuntimeServices =
   | ChildProcessSpawner.ChildProcessSpawner
@@ -50,6 +57,11 @@ export type DesktopSshEnvironmentDiscoverError = SshHostDiscoveryError;
 export class DesktopSshEnvironment extends Context.Service<
   DesktopSshEnvironment,
   {
+    readonly readLogs: (
+      target: DesktopSshEnvironmentTarget,
+      refreshRemote?: boolean,
+    ) => Effect.Effect<DesktopSshEnvironmentLogs>;
+    readonly clearLogs: (target: DesktopSshEnvironmentTarget) => Effect.Effect<void>;
     readonly discoverHosts: (input?: {
       readonly homeDir?: string;
     }) => Effect.Effect<readonly DesktopDiscoveredSshHost[], DesktopSshEnvironmentDiscoverError>;
@@ -131,8 +143,61 @@ export const make = Effect.gen(function* () {
   const prompts = yield* DesktopSshPasswordPrompts.DesktopSshPasswordPrompts;
   const runtimeContext = yield* Effect.context<DesktopSshEnvironmentRuntimeServices>();
   const passwordPrompt = SshAuth.SshPasswordPrompt.of(makePasswordPrompt(prompts));
+  const logs = createSshLogCache();
+
+  const capture = <A, E, R>(
+    target: DesktopSshEnvironmentTarget,
+    operation: Effect.Effect<A, E, R>,
+  ) =>
+    Effect.gen(function* () {
+      const entry = logs.get(targetConnectionKey(target), yield* Clock.currentTimeMillis);
+      const logger = Logger.make((options) => {
+        const record = Logger.formatStructured.log(options);
+        logs.append(
+          entry,
+          `${record.timestamp} ${record.level} ${typeof record.message === "string" ? record.message : JSON.stringify(record.message)}${record.cause ? `\n${record.cause}` : ""}`,
+          options.date.getTime(),
+        );
+      });
+      return yield* operation.pipe(
+        Effect.tapCause((cause) => Effect.logError("SSH operation failed", Cause.pretty(cause))),
+        Effect.provide(Logger.layer([logger], { mergeWithExisting: true })),
+        Effect.provideService(References.MinimumLogLevel, "Debug"),
+      );
+    });
 
   return DesktopSshEnvironment.of({
+    readLogs: Effect.fn("desktop.ssh.readLogs")(function* (target, refreshRemote = false) {
+      const entry = logs.get(targetConnectionKey(target), yield* Clock.currentTimeMillis);
+      if (refreshRemote) {
+        const revision = entry.revision;
+        const result = yield* manager
+          .readServerLogs(target)
+          .pipe(
+            Effect.provideService(SshAuth.SshPasswordPrompt, passwordPrompt),
+            Effect.provide(runtimeContext),
+            Effect.result,
+          );
+        if (entry.revision === revision) {
+          if (result._tag === "Success") {
+            entry.remote = redactConnectionLog(result.success);
+            entry.remoteError = null;
+          } else {
+            entry.remoteError = redactConnectionLog(String(result.failure));
+          }
+          entry.updatedAt = yield* Clock.currentTimeMillis;
+        }
+      }
+      return {
+        capturedAt: yield* Clock.currentTimeMillis,
+        local: entry.local,
+        remote: entry.remote,
+        remoteError: entry.remoteError,
+      };
+    }),
+    clearLogs: Effect.fn("desktop.ssh.clearLogs")(function* (target) {
+      logs.clear(targetConnectionKey(target), yield* Clock.currentTimeMillis);
+    }),
     discoverHosts: Effect.fn("desktop.ssh.discoverHosts")(function* (input) {
       return yield* discoverDesktopSshHostsEffect(input);
     }, Effect.provide(runtimeContext)),
@@ -141,14 +206,26 @@ export const make = Effect.gen(function* () {
     }, Effect.provide(runtimeContext)),
     ensureEnvironment: Effect.fn("desktop.ssh.ensureEnvironment")(
       function* (target, ensureOptions) {
-        return yield* manager.ensureEnvironment(target, ensureOptions);
+        return yield* capture(
+          target,
+          manager.ensureEnvironment(target, ensureOptions).pipe(
+            Effect.tap((bootstrap) =>
+              Effect.gen(function* () {
+                logs.bind(
+                  targetConnectionKey(bootstrap.target),
+                  logs.get(targetConnectionKey(target), yield* Clock.currentTimeMillis),
+                );
+              }),
+            ),
+          ),
+        );
       },
       Effect.provideService(SshAuth.SshPasswordPrompt, passwordPrompt),
       Effect.provide(runtimeContext),
     ),
     disconnectEnvironment: Effect.fn("desktop.ssh.disconnectEnvironment")(
       function* (target) {
-        return yield* manager.disconnectEnvironment(target);
+        return yield* capture(target, manager.disconnectEnvironment(target));
       },
       Effect.provideService(SshAuth.SshPasswordPrompt, passwordPrompt),
       Effect.provide(runtimeContext),

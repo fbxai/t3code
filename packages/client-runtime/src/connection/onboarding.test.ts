@@ -180,7 +180,20 @@ function layerPairingOnboarding(
       get: () => Effect.succeedNone,
       put: () => Effect.void,
     }),
-    Layer.mock(ClientCapabilities.SshEnvironmentGateway)({}),
+    Layer.mock(ClientCapabilities.SshEnvironmentGateway)({
+      provision: (target) =>
+        Effect.succeed({
+          environmentId: PAIRED_ENVIRONMENT_ID,
+          label: "Paired environment",
+          bootstrap: {
+            target,
+            httpBaseUrl: "http://127.0.0.1:3201/",
+            wsBaseUrl: "ws://127.0.0.1:3201/",
+            pairingToken: "pairing-token",
+          },
+          bearerToken: "bearer-token",
+        }),
+    }),
     Layer.succeed(
       Connectivity.Connectivity,
       Connectivity.Connectivity.of({ status: Effect.succeed("online"), changes: Stream.never }),
@@ -235,6 +248,28 @@ const registerSwitchedOffEnvironment = Effect.gen(function* () {
 });
 
 describe("connection onboarding", () => {
+  it.effect("clears an outdated compatibility block when adding a working SSH route", () =>
+    Effect.gen(function* () {
+      const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+      const onboarding = yield* Onboarding.ConnectionOnboarding;
+      yield* registerSwitchedOffEnvironment;
+
+      const environmentId = yield* onboarding.registerSsh({
+        target: {
+          alias: "devbox",
+          hostname: "devbox.example.test",
+          username: "developer",
+          port: 22,
+        },
+      });
+
+      const entry = (yield* SubscriptionRef.get(registry.entries)).get(environmentId);
+      expect(environmentId).toBe(PAIRED_ENVIRONMENT_ID);
+      expect(entry?.enabled).toBe(true);
+      expect(entry?.unsupportedReason).toBeUndefined();
+    }).pipe(Effect.provide(layerPairingOnboarding())),
+  );
+
   it.effect("prepares a persisted bearer registration from pairing details", () =>
     Effect.gen(function* () {
       const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];

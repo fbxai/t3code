@@ -17,6 +17,7 @@ import {
 import * as Option from "effect/Option";
 
 import { cn } from "../../lib/utils";
+import { ConnectionLogsDialog } from "./ConnectionLogsDialog";
 import { formatDesktopSshTarget } from "./EnvironmentRow";
 import { Input } from "../ui/input";
 import { CommandShortcut } from "../ui/command";
@@ -109,6 +110,8 @@ export function AddEnvironmentDialog({
     }
     return keys;
   })();
+  const [lastSshTarget, setLastSshTarget] = useState<DesktopSshEnvironmentTarget | null>(null);
+  const [connectionLogsOpen, setConnectionLogsOpen] = useState(false);
   const [savedBackendMode, setSavedBackendMode] = useState<"remote" | "ssh">("remote");
   const [savedBackendHost, setSavedBackendHost] = useState("");
   const [savedBackendPairingCode, setSavedBackendPairingCode] = useState("");
@@ -147,6 +150,8 @@ export function AddEnvironmentDialog({
     desktopBridge !== undefined &&
     (isLoadingDiscoveredSshHosts || unsavedDiscoveredSshHosts.length > 0);
   const connectSavedBackendSshTarget = async (target: DesktopSshEnvironmentTarget) => {
+    setLastSshTarget(target);
+    setConnectionLogsOpen(false);
     setIsAddingSavedBackend(true);
     onErrorChange(null);
     const result = await connectSshEnvironment({
@@ -576,6 +581,12 @@ export function AddEnvironmentDialog({
             />
           </label>
         </div>
+        {error && lastSshTarget && desktopBridge?.readSshEnvironmentLogs ? (
+          <Button variant="outline" onClick={() => setConnectionLogsOpen(true)}>
+            <TerminalIcon />
+            View connection logs
+          </Button>
+        ) : null}
         {error || discoveredSshHostsError ? (
           <Alert variant="error">
             <AlertDescription>{error ?? discoveredSshHostsError}</AlertDescription>
@@ -595,57 +606,67 @@ export function AddEnvironmentDialog({
   );
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <Tooltip>
-        <TooltipTrigger
-          render={
-            <DialogTrigger
-              render={
-                <Button size="xs" variant="ghost-muted" aria-label="Add environment">
-                  <PlusIcon className="size-3" />
-                  <span>Add environment</span>
-                </Button>
-              }
-            />
-          }
-        />
-        <TooltipPopup side="top">Add environment</TooltipPopup>
-      </Tooltip>
-      <DialogPopup className="max-h-[80dvh] sm:max-w-3xl">
-        <DialogHeader>
-          <DialogTitle>
-            {routeTarget ? `Add a route to ${routeTarget.label}` : "Add Environment"}
-          </DialogTitle>
-          <DialogDescription>
-            {routeTarget
-              ? "Pair this machine again over another address, such as its Tailscale name. It joins the existing routes instead of adding a second machine."
-              : "Pair another environment to this client."}
-          </DialogDescription>
-        </DialogHeader>
-        <DialogPanel>
-          <div className="space-y-4">
-            <div className="grid gap-3 sm:grid-cols-2">
-              {renderConnectionModeCard({
-                mode: "remote",
-                title: "Remote link",
-                description: "Enter a backend host and pairing code.",
-                icon: <ChevronsLeftRightEllipsisIcon aria-hidden className="size-4" />,
-              })}
-              {desktopBridge
-                ? renderConnectionModeCard({
-                    mode: "ssh",
-                    title: "SSH",
-                    description: "Use local SSH config, agent, and tunnels for the backend.",
-                    icon: <TerminalIcon aria-hidden className="size-4" />,
-                  })
-                : null}
+    <>
+      <Dialog open={open} onOpenChange={onOpenChange}>
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <DialogTrigger
+                render={
+                  <Button size="xs" variant="ghost-muted" aria-label="Add environment">
+                    <PlusIcon className="size-3" />
+                    <span>Add environment</span>
+                  </Button>
+                }
+              />
+            }
+          />
+          <TooltipPopup side="top">Add environment</TooltipPopup>
+        </Tooltip>
+        <DialogPopup className="max-h-[80dvh] sm:max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>
+              {routeTarget ? `Add a route to ${routeTarget.label}` : "Add Environment"}
+            </DialogTitle>
+            <DialogDescription>
+              {routeTarget
+                ? "Pair this machine again over another address, such as its Tailscale name. It joins the existing routes instead of adding a second machine."
+                : "Pair another environment to this client."}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogPanel>
+            <div className="space-y-4">
+              <div className="grid gap-3 sm:grid-cols-2">
+                {renderConnectionModeCard({
+                  mode: "remote",
+                  title: "Remote link",
+                  description: "Enter a backend host and pairing code.",
+                  icon: <ChevronsLeftRightEllipsisIcon aria-hidden className="size-4" />,
+                })}
+                {desktopBridge
+                  ? renderConnectionModeCard({
+                      mode: "ssh",
+                      title: "SSH",
+                      description: "Use local SSH config, agent, and tunnels for the backend.",
+                      icon: <TerminalIcon aria-hidden className="size-4" />,
+                    })
+                  : null}
+              </div>
+              <AnimatedHeight>
+                {savedBackendMode === "ssh" ? renderSshFields() : renderRemoteModeBody()}
+              </AnimatedHeight>
             </div>
-            <AnimatedHeight>
-              {savedBackendMode === "ssh" ? renderSshFields() : renderRemoteModeBody()}
-            </AnimatedHeight>
-          </div>
-        </DialogPanel>
-      </DialogPopup>
-    </Dialog>
+          </DialogPanel>
+        </DialogPopup>
+      </Dialog>
+      {connectionLogsOpen && lastSshTarget ? (
+        <ConnectionLogsDialog
+          target={lastSshTarget}
+          label={lastSshTarget.alias}
+          clientError={error}
+          onClose={() => setConnectionLogsOpen(false)}
+        />
+      ) : null}
+    </>
   );
 }

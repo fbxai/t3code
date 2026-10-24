@@ -1,6 +1,7 @@
 import {
   AuthStandardClientScopes,
   EnvironmentId,
+  ORCHESTRATION_PROTOCOL_VERSION,
   PRIMARY_LOCAL_ENVIRONMENT_ID,
   type DesktopBridge,
   type DesktopSshEnvironmentBootstrap,
@@ -63,6 +64,7 @@ function makeBridge(
   calls: string[],
   options?: {
     readonly failDescriptor?: boolean;
+    readonly protocolVersion?: number;
     readonly savedTokenRejected?: boolean;
     readonly savedTokenPermissions?: ReadonlyArray<string>;
   },
@@ -105,6 +107,7 @@ function makeBridge(
           arch: "x64",
         },
         serverVersion: "0.0.0-test",
+        orchestrationProtocolVersion: options?.protocolVersion ?? ORCHESTRATION_PROTOCOL_VERSION,
         capabilities: {
           repositoryIdentity: true,
         },
@@ -331,6 +334,28 @@ describe("desktop SSH pairing", () => {
       expect(error).toMatchObject({ reason: "configuration" });
       expect(calls).toEqual(["ensure", "descriptor"]);
     }),
+  );
+
+  it.effect.each([ORCHESTRATION_PROTOCOL_VERSION - 1, ORCHESTRATION_PROTOCOL_VERSION + 1])(
+    "rejects incompatible protocol %i before consuming the credential",
+    (protocolVersion) =>
+      Effect.gen(function* () {
+        const calls: string[] = [];
+
+        const error = yield* provisionDesktopSshEnvironment(
+          makeBridge(calls, { protocolVersion }),
+          TARGET,
+        ).pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(ConnectionBlockedError);
+        expect(error).toMatchObject({ reason: "unsupported" });
+        expect(error.message).toContain(
+          protocolVersion < ORCHESTRATION_PROTOCOL_VERSION
+            ? "This client requires a newer server"
+            : "This client is not supported by this server",
+        );
+        expect(calls).toEqual(["ensure", "descriptor"]);
+      }),
   );
 });
 

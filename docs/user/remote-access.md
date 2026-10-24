@@ -209,6 +209,14 @@ Sharing & access** on the host, or on a headless host with `t3 auth session list
 `t3 auth session revoke <id>`. A desktop that can still sign in over SSH pairs
 again on its next connect.
 
+To investigate a failed connection, open the environment's menu in
+**Settings → Environments** and choose **Connection logs**. After a failed
+**Add environment** attempt, choose **View connection logs** in the SSH form.
+The view shows SSH setup messages, connection errors, and the remote server's
+recent output. **Refresh remote log** reads the host over SSH without starting
+a server. Cached output stays on this device for the app session, expires after
+one hour, and can be removed with **Clear cached logs**.
+
 For Antigravity's Google callback on a remote host, see
 [remote sign-in](./providers-antigravity.md#sign-in-from-a-remote-device).
 

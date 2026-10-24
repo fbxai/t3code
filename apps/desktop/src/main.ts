@@ -113,7 +113,13 @@ const resolveDesktopSshCliRunner = (
       nodeEngineRange: serverPackageJson.engines.node,
     };
   }
-  return { archiveVersion: environment.appVersion };
+  const localArchiveDirectory = environment.path.join(environment.resourcesPath, "ssh-runtimes");
+  return {
+    archiveVersion: environment.appVersion,
+    ...(NodeFS.existsSync(environment.path.join(localArchiveDirectory, "SHA256SUMS"))
+      ? { localArchiveDirectory }
+      : {}),
+  };
 };
 
 const layerDesktopSshEnvironment = Layer.unwrap(

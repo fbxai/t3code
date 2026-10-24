@@ -13,6 +13,8 @@ import {
   DesktopSshEnvironmentEnsureInputSchema,
   DesktopSshEnvironmentEnsureResultSchema,
   DesktopSshEnvironmentTargetSchema,
+  DesktopSshEnvironmentLogsSchema,
+  DesktopSshEnvironmentLogsInputSchema,
   DesktopSshHttpBaseUrlInputSchema,
   DesktopSshPasswordPromptCancelledType,
   DesktopSshPasswordPromptResolutionInputSchema,
@@ -152,6 +154,26 @@ export const disconnectSshEnvironment = DesktopIpc.makeIpcMethod({
   handler: Effect.fn("desktop.ipc.sshEnvironment.disconnectEnvironment")(function* (target) {
     const sshEnvironment = yield* DesktopSshEnvironment.DesktopSshEnvironment;
     yield* sshEnvironment.disconnectEnvironment(target);
+  }),
+});
+
+export const readSshEnvironmentLogs = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.READ_SSH_ENVIRONMENT_LOGS_CHANNEL,
+  payload: DesktopSshEnvironmentLogsInputSchema,
+  result: DesktopSshEnvironmentLogsSchema,
+  handler: Effect.fn("desktop.ipc.sshEnvironment.readLogs")(function* ({ target, refreshRemote }) {
+    const ssh = yield* DesktopSshEnvironment.DesktopSshEnvironment;
+    return yield* ssh.readLogs(target, refreshRemote);
+  }),
+});
+
+export const clearSshEnvironmentLogs = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.CLEAR_SSH_ENVIRONMENT_LOGS_CHANNEL,
+  payload: DesktopSshEnvironmentTargetSchema,
+  result: Schema.Void,
+  handler: Effect.fn("desktop.ipc.sshEnvironment.clearLogs")(function* (target) {
+    const ssh = yield* DesktopSshEnvironment.DesktopSshEnvironment;
+    yield* ssh.clearLogs(target);
   }),
 });
 

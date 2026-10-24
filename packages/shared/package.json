@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./connectionLogs": {
+      "types": "./src/connectionLogs.ts",
+      "import": "./src/connectionLogs.ts"
+    },
     "./changedFileKind": {
       "types": "./src/changedFileKind.ts",
       "import": "./src/changedFileKind.ts"

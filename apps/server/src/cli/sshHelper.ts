@@ -4,6 +4,7 @@
 import * as NodeFS from "node:fs";
 import * as NodeHttp from "node:http";
 import * as NodeNet from "node:net";
+import { ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
 
 import * as Effect from "effect/Effect";
 import { Argument, Command } from "effect/cli";
@@ -124,7 +125,49 @@ const runtimePort = Command.make("runtime-port", {
   ),
 );
 
+const checkProtocol = Command.make("check-protocol", { port: Argument.Int("port") }).pipe(
+  Command.withHandler(({ port }) =>
+    Effect.promise(
+      () =>
+        new Promise<void>((resolve) => {
+          const request = NodeHttp.get(
+            { hostname: "127.0.0.1", port, path: "/.well-known/t3/environment", timeout: 1000 },
+            (response) => {
+              let body = "";
+              response.setEncoding("utf8");
+              response.on("data", (chunk: string) => {
+                body += chunk;
+              });
+              response.on("end", () => {
+                try {
+                  const descriptor = JSON.parse(body) as { orchestrationProtocolVersion?: unknown };
+                  if (
+                    response.statusCode !== 200 ||
+                    descriptor.orchestrationProtocolVersion !== ORCHESTRATION_PROTOCOL_VERSION
+                  ) {
+                    process.stderr.write(
+                      `An independently running T3 server uses protocol ${String(descriptor.orchestrationProtocolVersion)}; this desktop requires ${ORCHESTRATION_PROTOCOL_VERSION}. It was left running.\n`,
+                    );
+                    process.exitCode = 1;
+                  }
+                } catch {
+                  process.exitCode = 1;
+                }
+                resolve();
+              });
+            },
+          );
+          request.once("timeout", () => request.destroy());
+          request.once("error", () => {
+            process.exitCode = 1;
+            resolve();
+          });
+        }),
+    ),
+  ),
+);
+
 export const sshHelperCommand = Command.make("__ssh-helper").pipe(
   Command.unlisted,
-  Command.withSubcommands([pickPort, waitReady, runtimePort]),
+  Command.withSubcommands([pickPort, waitReady, runtimePort, checkProtocol]),
 );

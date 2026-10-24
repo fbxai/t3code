@@ -154,6 +154,10 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     ),
   disconnectSshEnvironment: (target) =>
     ipcRenderer.invoke(IpcChannels.DISCONNECT_SSH_ENVIRONMENT_CHANNEL, target),
+  readSshEnvironmentLogs: (target, refreshRemote = false) =>
+    ipcRenderer.invoke(IpcChannels.READ_SSH_ENVIRONMENT_LOGS_CHANNEL, { target, refreshRemote }),
+  clearSshEnvironmentLogs: (target) =>
+    ipcRenderer.invoke(IpcChannels.CLEAR_SSH_ENVIRONMENT_LOGS_CHANNEL, target),
   fetchSshEnvironmentDescriptor: (httpBaseUrl) =>
     ipcRenderer.invoke(IpcChannels.FETCH_SSH_ENVIRONMENT_DESCRIPTOR_CHANNEL, { httpBaseUrl }),
   bootstrapSshBearerSession: (httpBaseUrl, credential) =>

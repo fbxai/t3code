@@ -387,6 +387,19 @@ export const DesktopSshEnvironmentTargetSchema = Schema.Struct({
 });
 export type DesktopSshEnvironmentTarget = typeof DesktopSshEnvironmentTargetSchema.Type;
 
+export const DesktopSshEnvironmentLogsSchema = Schema.Struct({
+  capturedAt: Schema.Number,
+  local: Schema.String,
+  remote: Schema.String,
+  remoteError: Schema.NullOr(Schema.String),
+});
+export type DesktopSshEnvironmentLogs = typeof DesktopSshEnvironmentLogsSchema.Type;
+
+export const DesktopSshEnvironmentLogsInputSchema = Schema.Struct({
+  target: DesktopSshEnvironmentTargetSchema,
+  refreshRemote: Schema.optionalKey(Schema.Boolean),
+});
+
 export type DesktopSshHostSource = "ssh-config" | "known-hosts";
 export const DesktopSshHostSourceSchema = Schema.Literals(["ssh-config", "known-hosts"]);
 
@@ -1065,6 +1078,11 @@ export interface DesktopBridge {
     options?: { issuePairingToken?: boolean },
   ) => Promise<DesktopSshEnvironmentBootstrap>;
   disconnectSshEnvironment: (target: DesktopSshEnvironmentTarget) => Promise<void>;
+  readSshEnvironmentLogs?: (
+    target: DesktopSshEnvironmentTarget,
+    refreshRemote?: boolean,
+  ) => Promise<DesktopSshEnvironmentLogs>;
+  clearSshEnvironmentLogs?: (target: DesktopSshEnvironmentTarget) => Promise<void>;
   fetchSshEnvironmentDescriptor: (httpBaseUrl: string) => Promise<ExecutionEnvironmentDescriptor>;
   bootstrapSshBearerSession: (
     httpBaseUrl: string,

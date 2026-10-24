@@ -10,7 +10,7 @@ export const CLI_RELEASE_BASE_URL_ENV = "T3CODE_RELEASE_BASE_URL";
 
 // Keep archive keys aligned with the Linux matrix, Windows ARM64 build, and cli_archive rows in release.yml.
 // Node single-executables do not support darwin-x64 and segfault at startup.
-const CLI_ARCHIVE_PLATFORM_KEYS = [
+export const CLI_ARCHIVE_PLATFORM_KEYS = [
   "darwin-arm64",
   "linux-arm64",
   "linux-x64",

@@ -7,6 +7,7 @@ import * as Hex from "effect/encoding/Hex";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import type * as PlatformError from "effect/PlatformError";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
@@ -37,7 +38,7 @@ export interface SshCommandResult {
 export interface RunSshCommandOptions extends SshAuthOptions {
   readonly preHostArgs?: ReadonlyArray<string>;
   readonly remoteCommandArgs?: ReadonlyArray<string>;
-  readonly stdin?: string;
+  readonly stdin?: string | Stream.Stream<Uint8Array, PlatformError.PlatformError>;
   readonly timeoutMs?: number;
   /** Keep the end of long failed-command stdout, where the final cause usually is. */
   readonly keepErrorOutputTail?: boolean;
@@ -169,8 +170,8 @@ export function sshTargetLogFields(target: DesktopSshEnvironmentTarget) {
   };
 }
 
-function stdinStream(input: string | undefined) {
-  return input === undefined ? Stream.empty : Stream.make(encoder.encode(input));
+function stdinStream(input: RunSshCommandOptions["stdin"]) {
+  return typeof input === "string" ? Stream.make(encoder.encode(input)) : (input ?? Stream.empty);
 }
 
 const runSshCommandInScope = Effect.fn("ssh/command.runSshCommand.inScope")(function* (

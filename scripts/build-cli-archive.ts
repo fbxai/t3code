@@ -31,6 +31,7 @@ import { selectCliRuntimeExternalDependencies } from "./lib/cli-external-package
 import { signWithJsign } from "./lib/windows-jsign.ts";
 import { windowsSystemTar } from "./lib/windows-tar.ts";
 import { resolveCatalogDependencies } from "./lib/resolve-catalog.ts";
+import { pinInstalledDependencies } from "./lib/stage-dependencies.ts";
 
 const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
 const BuildArch = Schema.Literals(["arm64", "x64"]);
@@ -135,10 +136,11 @@ const stageRuntimeExternals = Effect.fn("stageRuntimeExternals")(function* (inpu
     yield* fs.readFileString(path.join(input.repoRoot, "pnpm-workspace.yaml")),
   );
   const catalog = workspace.catalog ?? {};
-  const serverDependencies = resolveCatalogDependencies(
-    serverPackageJson.dependencies,
-    catalog,
-    "apps/server",
+  const serverDependencies = yield* pinInstalledDependencies(
+    selectCliRuntimeExternalDependencies(
+      resolveCatalogDependencies(serverPackageJson.dependencies, catalog, "apps/server"),
+    ),
+    [path.join(input.repoRoot, "apps/server")],
   );
   const fffNodeVersion = serverDependencies["@ff-labs/fff-node"];
   if (fffNodeVersion === undefined) {
@@ -148,7 +150,7 @@ const stageRuntimeExternals = Effect.fn("stageRuntimeExternals")(function* (inpu
     });
   }
   const dependencies = {
-    ...selectCliRuntimeExternalDependencies(serverDependencies),
+    ...serverDependencies,
     ...resolveFffNativeDependencies(input.platform, input.arch, fffNodeVersion),
   };
   const patchedDependencies = createStagePatchedDependencies(
@@ -573,7 +575,7 @@ const buildCliArchive = Effect.fn("buildCliArchive")(function* (input: {
     // npm rejects Linux hardlink entries; macOS pnpm clones and bsdtar lacks this flag.
     yield* runCommand(
       ChildProcess.make("tar", [
-        ...(input.platform === "linux" ? ["--hard-dereference"] : []),
+        ...(hostPlatform === "linux" ? ["--hard-dereference"] : []),
         "-czf",
         archivePath,
         "-C",

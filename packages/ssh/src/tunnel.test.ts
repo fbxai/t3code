@@ -8,6 +8,9 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as PlatformError from "effect/PlatformError";
 import * as Result from "effect/Result";
+import * as FileSystem from "effect/FileSystem";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as Result from "effect/Result";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import { TestClock } from "effect/testing";
@@ -17,6 +20,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import * as SshAuth from "./auth.ts";
 import { SshCommandError } from "./errors.ts";
 import * as SshTunnel from "./tunnel.ts";
+import { SshCommandError } from "./errors.ts";
 
 const makeSuccessfulProcess = (stdout: string) => {
   const stdoutStream = Stream.make(new TextEncoder().encode(stdout));
@@ -82,6 +86,72 @@ function commandArgs(command: ChildProcess.Command): ReadonlyArray<string> {
 const ARCHIVE = { archiveVersion: "1.2.3-preview.20260911.4" } as const;
 
 describe("ssh tunnel scripts", () => {
+  it.effect.each([true, false])(
+    "reads remote diagnostics without provisioning or prompting (reachable: %s)",
+    (reachable) => {
+      const calls: Array<ReadonlyArray<string>> = [];
+      let runnerResolutions = 0;
+      const spawner = ChildProcessSpawner.make((command) =>
+        Effect.sync(() => {
+          const args = commandArgs(command);
+          calls.push(args);
+          if (args.includes("-G"))
+            return makeSuccessfulProcess("hostname actual.example.com\nuser remote\nport 2222\n");
+          const process = makeSuccessfulProcess("recent daemon output\n");
+          return reachable
+            ? process
+            : {
+                ...process,
+                exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(255)),
+                stderr: Stream.make(new TextEncoder().encode("Permission denied (publickey).")),
+              };
+        }),
+      );
+      return Effect.gen(function* () {
+        const manager = yield* SshTunnel.SshEnvironmentManager;
+        const result = yield* Effect.result(
+          manager.readServerLogs({
+            alias: "devbox",
+            hostname: "devbox",
+            username: null,
+            port: null,
+          }),
+        );
+        if (reachable) {
+          assert.isTrue(Result.isSuccess(result));
+          if (Result.isSuccess(result)) assert.equal(result.success, "recent daemon output");
+        } else {
+          assert.isTrue(Result.isFailure(result));
+          if (Result.isFailure(result)) assert.instanceOf(result.failure, SshCommandError);
+        }
+        assert.equal(calls.length, 2);
+        assert.include(calls[1]!, "BatchMode=yes");
+        assert.include(calls[1]!, "remote@devbox");
+        assert.equal(runnerResolutions, 0);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            NodeServices.layer,
+            Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
+            Layer.succeed(SshAuth.SshPasswordPrompt, {
+              isAvailable: true,
+              request: () => Effect.die("logs must not prompt"),
+            }),
+            SshTunnel.SshEnvironmentManager.layer({
+              resolveCliRunner: Effect.sync(() => {
+                runnerResolutions++;
+                return ARCHIVE;
+              }),
+            }),
+            Layer.succeed(HttpClient.HttpClient, testHttpClient),
+            Layer.succeed(NetService.NetService, testNetService),
+          ),
+        ),
+        Effect.scoped,
+      );
+    },
+  );
+
   it("rejects archive versions that are not a single exact version segment", () => {
     for (const archiveVersion of [
       "../other",
@@ -368,3 +438,172 @@ describe("ssh tunnel scripts", () => {
 // desktop app with network access on) listens on *:<port>. Linux refuses that
 // bind unless both sockets set SO_REUSEPORT, so on Linux the preload adds it to
 // the picker's probe and the holder sets it too.
+
+// Runs a generated script with an isolated HOME, as an SSH remote would.
+const runScript = (home: string, args: ReadonlyArray<string>) =>
+  Effect.gen(function* () {
+    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+    const child = yield* spawner.spawn(
+      ChildProcess.make("sh", args, {
+        env: { PATH: process.env.PATH ?? "", HOME: home },
+        extendEnv: false,
+      }),
+    );
+    const [stdout, stderr, exitCode] = yield* Effect.all(
+      [
+        child.stdout.pipe(
+          Stream.decodeText(),
+          Stream.runFold(
+            () => "",
+            (acc, chunk) => acc + chunk,
+          ),
+        ),
+        child.stderr.pipe(
+          Stream.decodeText(),
+          Stream.runFold(
+            () => "",
+            (acc, chunk) => acc + chunk,
+          ),
+        ),
+        child.exitCode.pipe(Effect.map(Number)),
+      ],
+      { concurrency: "unbounded" },
+    );
+    return { stdout, stderr, exitCode };
+  });
+
+// The archive runner is generated shell; string assertions cannot prove the
+// lock excludes concurrent installers. Run the real script against a tiny
+// fake archive served from a file:// mirror.
+describe("archive runner script", () => {
+  const hostPlatform = HostProcess.Platform.defaultValue();
+  const hostArch = HostProcess.Architecture.defaultValue();
+  const windowsHost = hostPlatform === "win32";
+  const archiveVersion = "1.2.3-preview.20260911.4";
+
+  const runRunner = (home: string, runner: string) => runScript(home, [runner, "--version"]);
+
+  // A fake "executable" that answers --version, packed the way the release
+  // workflow packs the real archive: one top-level directory named after the
+  // stem, checksummed in SHA256SUMS.
+  const makeMirror = Effect.fn("makeMirror")(function* (root: string, executable?: string) {
+    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+    const platform = hostPlatform === "darwin" ? "darwin" : "linux";
+    const arch = hostArch === "arm64" ? "arm64" : "x64";
+    const stem = `t3-${archiveVersion}-${platform}-${arch}`;
+    const stage = `${root}/stage/${stem}`;
+    const release = `${root}/mirror/v${archiveVersion}`;
+    const script = [
+      "set -eu",
+      `mkdir -p '${stage}' '${release}'`,
+      `printf '%s' '${(executable ?? `#!/bin/sh\necho t3 v${archiveVersion}\n`).replaceAll("'", "'\\''")}' > '${stage}/t3'`,
+      `chmod +x '${stage}/t3'`,
+      `tar -czf '${release}/${stem}.tar.gz' -C '${root}/stage' '${stem}'`,
+      `cd '${release}' && (sha256sum '${stem}.tar.gz' 2>/dev/null || shasum -a 256 '${stem}.tar.gz') > SHA256SUMS`,
+    ].join("\n");
+    const child = yield* spawner.spawn(ChildProcess.make("sh", ["-c", script]));
+    assert.equal(Number(yield* child.exitCode), 0);
+    return `file://${root}/mirror`;
+  });
+
+  it.live.skipIf(windowsHost)(
+    "uploads the matching local archive, installs it, and reuses it without uploading again",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-local-archive-" });
+        const home = `${root}/home`;
+        yield* fs.makeDirectory(home);
+        yield* makeMirror(
+          root,
+          `#!/bin/sh
+case "$1" in
+  --version) echo local-checkout ;;
+  __ssh-helper) case "$2" in runtime-port) exit 1 ;; pick-port) echo 42900 ;; *) exit 0 ;; esac ;;
+  serve) exec sleep 600 ;;
+esac
+`,
+        );
+        let uploads = 0;
+        const remoteSpawner = ChildProcessSpawner.make((command) => {
+          assert.equal(command._tag, "StandardCommand");
+          if (command._tag !== "StandardCommand") return Effect.die("Unexpected pipeline");
+          const start = command.args.indexOf("sh");
+          assert.isAtLeast(start, 0);
+          if (command.args[start + 1] === "-c") uploads += 1;
+          return spawner.spawn(
+            ChildProcess.make("sh", ["-c", command.args.slice(start).join(" ")], {
+              env: { ...process.env, HOME: home },
+              extendEnv: false,
+              stdin: command.options.stdin,
+            }),
+          );
+        });
+        const target = {
+          alias: "irrelevant-name",
+          hostname: "127.0.0.1",
+          username: null,
+          port: null,
+        };
+        const runner = {
+          archiveVersion,
+          localArchiveDirectory: `${root}/mirror/v${archiveVersion}`,
+        };
+        const launch = SshTunnel.launchOrReuseRemoteServer(target, undefined, runner).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, remoteSpawner),
+        );
+        yield* Effect.addFinalizer(() =>
+          Effect.gen(function* () {
+            const states = yield* fs
+              .readDirectory(`${home}/.t3/ssh-launch`)
+              .pipe(Effect.orElseSucceed(() => []));
+            for (const state of states) {
+              const pid = Number(yield* fs.readFileString(`${home}/.t3/ssh-launch/${state}/pid`));
+              yield* Effect.try(() => process.kill(pid, "SIGKILL")).pipe(Effect.ignore);
+            }
+          }).pipe(Effect.orDie),
+        );
+        assert.deepEqual(yield* launch, { remotePort: 42900, remoteServerKind: "managed" });
+        assert.equal(uploads, 1);
+        assert.equal(
+          (yield* fs.readFileString(
+            `${home}/.t3/runtime/versions/${archiveVersion}/.install-complete`,
+          )).trim(),
+          archiveVersion,
+        );
+        assert.deepEqual(yield* launch, { remotePort: 42900, remoteServerKind: "managed" });
+        assert.equal(uploads, 1);
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.live.skipIf(windowsHost)(
+    "rejects a corrupted uploaded archive without marking the runtime installed",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-corrupt-upload-" });
+        yield* makeMirror(root);
+        const home = `${root}/home`;
+        const uploaded = `${home}/.t3/ssh-archives/${archiveVersion}`;
+        yield* fs.copy(`${root}/mirror/v${archiveVersion}`, uploaded);
+        const archive = (yield* fs.readDirectory(uploaded)).find((name) =>
+          name.endsWith(".tar.gz"),
+        );
+        assert.isDefined(archive);
+        yield* fs.writeFileString(`${uploaded}/${archive}`, "corrupted transfer");
+        const runner = `${root}/runner.sh`;
+        yield* fs.writeFileString(
+          runner,
+          SshTunnel.buildRemoteT3RunnerScript({
+            archiveVersion,
+            localArchiveDirectory: "/bundled",
+          }),
+        );
+        const result = yield* runRunner(home, runner);
+        assert.equal(result.exitCode, 1);
+        assert.include(result.stderr, "Checksum mismatch");
+        assert.isFalse(yield* fs.exists(`${home}/.t3/runtime/versions/${archiveVersion}`));
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+});

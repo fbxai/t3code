@@ -3,6 +3,7 @@
 
 import * as NodeFSP from "node:fs/promises";
 import * as NodeCrypto from "node:crypto";
+import { pinInstalledDependencies } from "./lib/stage-dependencies.ts";
 import * as NodeModule from "node:module";
 // plist is CommonJS; Node cannot load its named exports from an ES module.
 import Plist from "plist";
@@ -709,6 +710,15 @@ export class WslRuntimeArchiveMissingError extends Schema.TaggedError<WslRuntime
   }
 }
 
+export class SshRuntimeArchiveChecksumError extends Schema.TaggedError<SshRuntimeArchiveChecksumError>()(
+  "SshRuntimeArchiveChecksumError",
+  { archivePath: Schema.String },
+) {
+  override get message(): string {
+    return `SSH runtime archive does not match SHA256SUMS: ${this.archivePath}.`;
+  }
+}
+
 export class WindowsServerSidecarPackError extends Schema.TaggedError<WindowsServerSidecarPackError>()(
   "WindowsServerSidecarPackError",
   {
@@ -985,6 +995,8 @@ export const DESKTOP_FILE_EXCLUSIONS = [
   "!**/*.d.cts",
   "!apps/desktop/resources/browser-secret",
   "!apps/desktop/resources/browser-secret/**/*",
+  "!apps/desktop/resources/ssh-runtimes",
+  "!apps/desktop/resources/ssh-runtimes/**/*",
   "!apps/desktop/prod-resources/browser-secret",
   "!apps/desktop/prod-resources/browser-secret/**/*",
   "!apps/desktop/prod-resources/windows-server",
@@ -2769,6 +2781,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     | undefined,
   wslRuntimeBundled = false,
   arch?: typeof BuildArch.Type,
+  sshRuntimesBundled = false,
 ) {
   const buildConfig: Record<string, unknown> = {
     appId: DESKTOP_APP_ID,
@@ -2792,6 +2805,9 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       : {}),
     extraResources: [
       ...DESKTOP_EXTRA_RESOURCES,
+      ...(sshRuntimesBundled
+        ? [{ from: "apps/desktop/resources/ssh-runtimes", to: "ssh-runtimes" }]
+        : []),
       ...(platform === "linux" ? LINUX_CAPTURE_EXTRA_RESOURCES : []),
       ...(platform === "linux" ? LINUX_BROWSER_SECRET_EXTRA_RESOURCES : []),
       ...(platform === "win" ? WINDOWS_SERVER_EXTRA_RESOURCES : []),
@@ -3088,10 +3104,13 @@ export const stageWindowsServerSidecar = Effect.fn("stageWindowsServerSidecar")(
   yield* fs.makeDirectory(path.join(serverStageDir, "apps/server"), { recursive: true });
   yield* fs.copy(input.serverDistDir, path.join(serverStageDir, "apps/server/dist"));
 
-  const sidecarDependencies = {
-    ...input.runtimeExternalDependencies,
-    ...resolveFffNativeDependencies("win", input.arch, input.fffNodeVersion),
-  };
+  const sidecarDependencies = yield* pinInstalledDependencies(
+    {
+      ...input.runtimeExternalDependencies,
+      ...resolveFffNativeDependencies("win", input.arch, input.fffNodeVersion),
+    },
+    [path.join(input.repoRoot, "apps/server")],
+  );
   const sidecarPatchedDependencies = createStagePatchedDependencies(
     input.patchedDependencies,
     sidecarDependencies,
@@ -3634,6 +3653,7 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
   });
 
   const appVersion = options.version ?? serverPackageJson.version;
+  const sshRuntimes = yield* Config.String("T3CODE_DESKTOP_SSH_RUNTIMES").pipe(Config.option);
   const iconAssets = resolveDesktopBuildIconAssets(appVersion);
   const commitHash = yield* resolveGitCommitHash(repoRoot);
   const mkdir = options.keepStage ? fs.makeTempDirectory : fs.makeTempDirectoryScoped;
@@ -3833,7 +3853,7 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
     );
   }
 
-  const stageDependencies =
+  const stageDependencies = yield* pinInstalledDependencies(
     options.platform === "win"
       ? { ...resolvedDesktopRuntimeDependencies }
       : resolveMergedStageDependencies({
@@ -3842,7 +3862,9 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
           desktopDependencies: resolvedDesktopRuntimeDependencies,
           arch: options.arch,
           fffNodeVersion: serverPackageJson.dependencies["@ff-labs/fff-node"],
-        });
+        }),
+    [path.join(repoRoot, "apps/desktop"), path.join(repoRoot, "apps/server")],
+  );
   const stagePatchedDependencies = createStagePatchedDependencies(
     workspacePatchedDependencies,
     stageDependencies,
@@ -3881,6 +3903,7 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
         : undefined,
       bundlesWslRuntime({ platform: options.platform, runtimeArchivePath: options.wslRuntime }),
       options.arch,
+      Option.isSome(sshRuntimes),
     ),
     dependencies: stageDependencies,
     devDependencies: {
@@ -3951,6 +3974,21 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
       archivePath: path.join(stageAppDir, WSL_RUNTIME_ARCHIVE_EXTRA_RESOURCE.from),
       hashPath: path.join(stageAppDir, WSL_RUNTIME_ARCHIVE_HASH_EXTRA_RESOURCE.from),
     });
+  }
+  if (Option.isSome(sshRuntimes)) {
+    const source = path.resolve(sshRuntimes.value);
+    const checksums = yield* fs.readFileString(path.join(source, "SHA256SUMS"));
+    for (const platform of ["darwin-arm64", "linux-arm64", "linux-x64"]) {
+      const archive = `t3-${appVersion}-${platform}.tar.gz`;
+      const bytes = yield* fs.readFile(path.join(source, archive));
+      const digest = NodeCrypto.createHash("sha256").update(bytes).digest("hex");
+      if (!checksums.split(/\r?\n/).includes(`${digest}  ${archive}`)) {
+        return yield* new SshRuntimeArchiveChecksumError({
+          archivePath: path.join(source, archive),
+        });
+      }
+    }
+    yield* fs.copy(source, path.join(stageResourcesDir, "ssh-runtimes"));
   }
 
   // electron-builder treats empty signing variables as enabled; scrub them before spawning.

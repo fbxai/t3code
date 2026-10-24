@@ -13,6 +13,7 @@ import {
   ConnectionTransientError,
   Connectivity,
   mapRemoteEnvironmentError,
+  orchestrationProtocolCompatibilityError,
   type PlatformConnectionRegistration,
   PrimaryConnectionRegistration,
   PrimaryConnectionTarget,
@@ -232,6 +233,10 @@ export const provisionDesktopSshEnvironment = Effect.fn(
       reason: "configuration",
       detail: `That host reaches ${descriptor.label}, a different machine. Add it as its own environment instead.`,
     });
+  }
+  const compatibilityError = orchestrationProtocolCompatibilityError(descriptor);
+  if (compatibilityError !== null) {
+    return yield* compatibilityError;
   }
   const access = yield* Effect.tryPromise({
     try: () => bridge.bootstrapSshBearerSession(bootstrap.httpBaseUrl, pairingToken),
