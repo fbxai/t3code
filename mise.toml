@@ -1,0 +1,32 @@
+[tools]
+viteplus = "1.0.0"
+
+[env]
+_.path = ["{{config_root}}/node_modules/.bin"]
+
+[tasks."install:deps"]
+description = "Install project dependencies"
+run = "vp install --frozen-lockfile"
+
+[tasks."check:code"]
+description = "Check formatting and lint the project"
+depends = ["install:deps"]
+run = ["vp run fmt --check", "vp run lint"]
+
+[tasks."fix:code"]
+description = "Format the project and fix lint issues"
+run = ["vp run fmt", "vp run lint --fix"]
+
+[tasks.dev]
+description = "Start the desktop development environment"
+depends = ["install:deps"]
+run = "vp run dev:desktop"
+
+[tasks.build]
+description = "Build a local macOS ARM64 desktop release"
+depends = ["check:code"]
+run = "mise exec node@26.8.2 zig@0.15.2 -- node scripts/build-local-desktop.ts"
+
+[tasks.test]
+description = "Run tests"
+run = "vp test"
