@@ -11,6 +11,7 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
@@ -249,6 +250,33 @@ describe("makeManagedServerProvider", () => {
       }),
     ).pipe(Effect.provide(layerAlwaysRunTest)),
   );
+  it.effect("attributes probe output to the instance that owns it", () => {
+    const records: string[] = [];
+    const logger = Logger.make((options) =>
+      records.push(JSON.stringify(Logger.formatStructured.log(options))),
+    );
+    return Effect.gen(function* () {
+      const provider = yield* makeManagedServerProvider<TestSettings>({
+        resolveMaintenance: () => Effect.succeed(maintenanceCapabilities),
+        getSettings: Effect.succeed({ enabled: true }),
+        streamSettings: Stream.empty,
+        haveSettingsChanged: () => false,
+        refreshOnInterval: false,
+        initialSnapshot: () => Effect.succeed({ ...initialSnapshot, displayName: "Work account" }),
+        checkProvider: Effect.logWarning("Probe startup failed").pipe(Effect.as(refreshedSnapshot)),
+      });
+      yield* provider.refresh;
+      const text = records.join("\n");
+      assert.include(text, '"providerInstanceId":"codex"');
+      assert.include(text, '"providerDisplayName":"Work account"');
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.merge(layerAlwaysRunTest, Logger.layer([logger], { mergeWithExisting: false })),
+      ),
+    );
+  });
+
   it.effect(
     "runs the initial provider check in the background and streams the refreshed snapshot",
     () =>

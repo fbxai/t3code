@@ -6,14 +6,9 @@ import { ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
-import * as FileSystem from "effect/FileSystem";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
-// On macOS, Node can bind 127.0.0.1:<port> while another process (such as the
-// desktop app with network access on) listens on *:<port>. Linux refuses that
-// bind unless both sockets set SO_REUSEPORT, so on Linux the preload adds it to
-// the picker's probe and the holder sets it too. macOS needs neither.
 describe("__ssh-helper check-protocol", () => {
   it.live.each([1, ORCHESTRATION_PROTOCOL_VERSION])(
     "checks protocol %s regardless of the environment label",

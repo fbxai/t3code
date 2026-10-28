@@ -1,4 +1,5 @@
 import { assert, describe, it } from "@effect/vitest";
+import { ProviderInstanceId } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -61,6 +62,49 @@ function readTraces(fileSystem: Partial<FileSystem.FileSystem>) {
 }
 
 describe("TraceDiagnostics", () => {
+  it("returns bounded output for only the requested provider, including successful checks", () => {
+    const instanceId = ProviderInstanceId.make("omp");
+    const aggregator = TraceDiagnostics.makeTraceDiagnosticsAggregator(undefined, instanceId);
+    aggregator.addLine(
+      record({
+        name: "checkPiProviderStatus",
+        traceId: "trace-provider",
+        spanId: "span-provider",
+        startMs: 1,
+        durationMs: 100,
+        events: [
+          ...Array.from({ length: 25 }, (_, index) => ({
+            name: `OMP output ${index}`,
+            timeUnixNano: ns(index + 1),
+            attributes: { "effect.logLevel": "INFO", providerInstanceId: instanceId },
+          })),
+          ...Array.from({ length: 30 }, (_, index) => ({
+            name: `Other output ${index}`,
+            timeUnixNano: ns(index + 50),
+            attributes: { "effect.logLevel": "ERROR", providerInstanceId: "other" },
+          })),
+          {
+            name: "Unattributed output",
+            timeUnixNano: ns(99),
+            attributes: { "effect.logLevel": "WARN" },
+          },
+        ],
+      }),
+    );
+    const result = aggregator.finish({ traceFilePath, scannedFilePaths: [traceFilePath], readAt });
+    assert.lengthOf(result.providerLogs!, 20);
+    assert.equal(result.providerLogs![0]!.message, "OMP output 24");
+    assert.equal(result.providerLogs![19]!.message, "OMP output 5");
+    assert.isTrue(
+      result.providerLogs!.every(
+        (log) => log.level === "INFO" && log.message.startsWith("OMP output"),
+      ),
+    );
+    assert.isTrue(
+      result.latestWarningAndErrorLogs.some((log) => log.message === "Unattributed output"),
+    );
+  });
+
   it.effect("aggregates failures, slow spans, log levels, and parse errors", () =>
     Effect.sync(() => {
       const diagnostics = aggregateLines([

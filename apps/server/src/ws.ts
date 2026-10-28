@@ -2520,10 +2520,13 @@ export const layerWsRpc = (
             return ServerSettings.redactServerSettingsForClient(settings);
           }),
         [WS_METHODS.serverDiscoverSourceControl]: (_input) => sourceControlDiscovery.discover,
-        [WS_METHODS.serverGetTraceDiagnostics]: (_input) =>
+        [WS_METHODS.serverGetTraceDiagnostics]: (input) =>
           TraceDiagnostics.readTraceDiagnostics({
             traceFilePath: config.serverTracePath,
             maxFiles: config.traceMaxFiles,
+            ...(input.providerInstanceId === undefined
+              ? {}
+              : { providerInstanceId: input.providerInstanceId }),
           }),
         [WS_METHODS.serverGetProcessDiagnostics]: (_input) => processDiagnostics.read,
         [WS_METHODS.serverGetHostResources]: (_input) => hostResources.read,

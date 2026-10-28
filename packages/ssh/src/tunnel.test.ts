@@ -10,7 +10,6 @@ import * as PlatformError from "effect/PlatformError";
 import * as Result from "effect/Result";
 import * as FileSystem from "effect/FileSystem";
 import * as HostProcess from "@t3tools/shared/HostProcess";
-import * as Result from "effect/Result";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import { TestClock } from "effect/testing";
@@ -20,7 +19,6 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import * as SshAuth from "./auth.ts";
 import { SshCommandError } from "./errors.ts";
 import * as SshTunnel from "./tunnel.ts";
-import { SshCommandError } from "./errors.ts";
 
 const makeSuccessfulProcess = (stdout: string) => {
   const stdoutStream = Stream.make(new TextEncoder().encode(stdout));
@@ -433,11 +431,6 @@ describe("ssh tunnel scripts", () => {
       }),
   );
 });
-
-// On macOS, Node can bind 127.0.0.1:<port> while another process (such as the
-// desktop app with network access on) listens on *:<port>. Linux refuses that
-// bind unless both sockets set SO_REUSEPORT, so on Linux the preload adds it to
-// the picker's probe and the holder sets it too.
 
 // Runs a generated script with an isolated HOME, as an SSH remote would.
 const runScript = (home: string, args: ReadonlyArray<string>) =>

@@ -149,7 +149,12 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
       return state.snapshot;
     }
 
-    const probedSnapshot = yield* input.checkProvider;
+    const probedSnapshot = yield* input.checkProvider.pipe(
+      Effect.annotateLogs({
+        providerInstanceId: initialSnapshot.instanceId,
+        providerDisplayName: initialSnapshot.displayName ?? initialSnapshot.driver,
+      }),
+    );
     const { snapshot: nextSnapshot, generation: nextGeneration } = yield* Ref.modify(
       snapshotStateRef,
       (state) => {

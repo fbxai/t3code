@@ -40,6 +40,7 @@ export function ConnectionLogsDialog({
   const latest = useRef(snapshot);
   const bridge = window.desktopBridge;
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Subscribe to Desktop SSH output while the dialog is mounted and release its polling timer on close.
   useEffect(() => {
     const readLogs = bridge?.readSshEnvironmentLogs;
     if (!readLogs) return;

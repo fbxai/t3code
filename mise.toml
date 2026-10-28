@@ -1,5 +1,6 @@
 [tools]
-viteplus = "1.0.0"
+viteplus = "1.4.0"
+node = "26.12.1"
 
 [env]
 _.path = ["{{config_root}}/node_modules/.bin"]
@@ -25,7 +26,7 @@ run = "vp run dev:desktop"
 [tasks.build]
 description = "Build a local macOS ARM64 desktop release"
 depends = ["check:code"]
-run = "mise exec node@26.8.2 zig@0.15.2 -- node scripts/build-local-desktop.ts"
+run = "mise exec node@26.12.1 zig@0.15.2 -- node scripts/build-local-desktop.ts"
 
 [tasks.test]
 description = "Run tests"

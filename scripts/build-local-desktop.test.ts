@@ -1,3 +1,5 @@
+// @effect-diagnostics nodeBuiltinImport:off - Exercise the generated linker in a real shell.
+// @effect-diagnostics globalDate:off - Fixed UTC dates make version generation deterministic.
 import { describe, expect, it } from "vite-plus/test";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";

@@ -75,6 +75,23 @@ threads.
 
 ## Troubleshooting
 
+In **Settings → Providers**, choose **Show logs / errors** to open the bottom Output panel.
+It keeps the full diagnostic and recent output available while you edit the provider's settings.
+Refresh the logs after reproducing a failure, or copy the output to inspect elsewhere.
+
+In the environment's server console, look for **Pi provider probe** or **Pi RPC discovery failed**.
+The log distinguishes the version check from RPC discovery and includes a `reproduce`
+command with the server's working directory, PATH, and home directory. For RPC discovery, start
+that command, paste each logged `stdin` JSON request on its own line, and read stdout and stderr
+in your terminal. Stop the process when finished. Secret arguments are redacted; restore them
+and apply any instance environment overrides from your settings before reproducing.
+
+On desktop, open **Settings → General → Diagnostics → View diagnostics** and search for
+**Pi provider probe**. With the default logging setup, the same records are in T3 home's
+`userdata/logs/server.trace.ndjson`. For an SSH environment, use its **Connection logs** view or read
+`~/.t3/ssh-launch/<state>/server.log` on the host. These are server logs, separate from the
+desktop renderer's Developer Tools console.
+
 - If Pi is unavailable, confirm that the configured binary runs on the server machine, then refresh
   the provider in Settings.
 - If no models appear, open Pi directly and confirm its authentication and model configuration.

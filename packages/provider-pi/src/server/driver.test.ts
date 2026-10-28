@@ -1,6 +1,8 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import { DEFAULT_SERVER_SETTINGS, ProviderInstanceId } from "@t3tools/contracts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -55,13 +57,15 @@ const makePiSpawner = Effect.fnUntraced(function* (
       if (!ChildProcess.isStandardCommand(command)) return yield* Effect.die("Unexpected pipeline");
       launches.push(command);
       const version = command.args.includes("--version");
+      const authCheck = command.args[0] === "auth" && command.args[1] === "check";
+      const oneShot = version || authCheck;
       const stdout = yield* Queue.unbounded<Uint8Array>();
       const cwd = command.options.cwd;
       return ChildProcessSpawner.makeHandle({
         // Outside the valid PID range, so transport cleanup cannot signal a real process.
         pid: ChildProcessSpawner.ProcessId(999_999_999),
-        exitCode: version ? Effect.succeed(ChildProcessSpawner.ExitCode(0)) : Effect.never,
-        isRunning: Effect.succeed(!version),
+        exitCode: oneShot ? Effect.succeed(ChildProcessSpawner.ExitCode(0)) : Effect.never,
+        isRunning: Effect.succeed(!oneShot),
         kill: () => Effect.void,
         unref: Effect.succeed(Effect.void),
         stdin: Sink.forEach((chunk: Uint8Array) => {
@@ -102,7 +106,11 @@ const makePiSpawner = Effect.fnUntraced(function* (
             ),
           ).pipe(Effect.asVoid);
         }),
-        stdout: version ? Stream.succeed(encoder.encode("pi 1.0.2\n")) : Stream.fromQueue(stdout),
+        stdout: version
+          ? Stream.succeed(encoder.encode("pi 1.0.2\n"))
+          : authCheck
+            ? Stream.succeed(encoder.encode('{"reason":"credentials_not_configured"}\n'))
+            : Stream.fromQueue(stdout),
         stderr: Stream.empty,
         all: Stream.empty,
         getInputFd: () => Sink.drain,
@@ -113,10 +121,10 @@ const makePiSpawner = Effect.fnUntraced(function* (
   return { spawner, launches, pendingCommand };
 });
 
-const create = (config: Partial<PiSettings> = {}, enabled = true) =>
+const create = (config: Partial<PiSettings> = {}, enabled = true, displayName = "My Pi") =>
   PiDriver.create({
     instanceId: ProviderInstanceId.make("pi-workspace-test"),
-    displayName: "My Pi",
+    displayName,
     accentColor: "#abcdef",
     environment: [{ name: "PI_CODING_AGENT_DIR", value: "/isolated-pi", sensitive: false }],
     enabled,
@@ -124,6 +132,46 @@ const create = (config: Partial<PiSettings> = {}, enabled = true) =>
   });
 
 it.layer(layerTest)("PiDriver workspace discovery", (it) => {
+  it.effect.each([
+    { customModels: [], expectedName: "OMP default" },
+    {
+      customModels: [{ slug: "default", name: "My preferred model" }],
+      expectedName: "My preferred model",
+    },
+  ])(
+    "uses the instance label for the default entry, preserving model name overrides: $expectedName",
+    ({ customModels, expectedName }) =>
+      Effect.gen(function* () {
+        const { spawner } = yield* makePiSpawner();
+        const instance = yield* create({ customModels }, true, "OMP").pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        );
+        assert.equal((yield* instance.snapshot.getSnapshot).models[0]?.name, expectedName);
+        yield* instance.snapshot.refresh;
+        assert.equal((yield* instance.snapshot.getSnapshot).models[0]?.name, expectedName);
+        assert.equal((yield* instance.snapshotForCwd!("/first")).models[0]?.name, expectedName);
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect("expands a custom executable's home path for both health and RPC checks", () =>
+    Effect.gen(function* () {
+      const { spawner, launches } = yield* makePiSpawner();
+      const instance = yield* create({ binaryPath: "~/.local/bin/omp" }).pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        Effect.provideService(HostProcess.HomeDirectory, "/test-home"),
+      );
+      yield* instance.snapshot.refresh;
+      assert.isTrue(launches.some((launch) => launch.args.includes("--version")));
+      assert.isTrue(launches.some((launch) => launch.args.includes("rpc")));
+      assert.isTrue(
+        launches.every(
+          (launch) => launch.command === expandHomePath("~/.local/bin/omp", "/test-home"),
+        ),
+      );
+      assert.equal((yield* instance.snapshot.getSnapshot).displayName, "My Pi");
+    }).pipe(Effect.scoped),
+  );
+
   it.effect("keeps each workspace's skills and commands separate from the machine catalog", () =>
     Effect.gen(function* () {
       const { spawner, launches } = yield* makePiSpawner();
@@ -217,13 +265,64 @@ it.layer(layerTest)("PiDriver workspace discovery", (it) => {
             ),
           ]),
           [
-            ["default", []],
+            ["default", known ? ["high"] : []],
             ["test/model", known ? ["high"] : []],
             ["other/model", []],
             ["test/other", []],
           ],
         );
       }).pipe(Effect.scoped),
+  );
+
+  it.effect("uses the active model's capabilities when it is absent from the catalog", () =>
+    Effect.gen(function* () {
+      const { spawner } = yield* makePiSpawner({
+        state: {
+          model: {
+            provider: "private",
+            id: "model",
+            reasoning: true,
+            thinkingLevelMap: { off: null, xhigh: "extra_high", max: null },
+          },
+          thinkingLevel: "xhigh",
+        },
+      });
+      const instance = yield* create().pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      );
+      yield* instance.snapshot.refresh;
+      const snapshot = yield* instance.snapshot.getSnapshot;
+      const thinking = snapshot.models[0]?.capabilities?.optionDescriptors?.[0];
+      assert.equal(thinking?.id, "thinking");
+      assert.equal(thinking?.type, "select");
+      if (thinking?.type !== "select") return;
+      assert.deepEqual(
+        thinking.options.map((option) => option.id),
+        ["minimal", "low", "medium", "high", "xhigh"],
+      );
+      assert.equal(thinking.options.find((option) => option.isDefault)?.id, "xhigh");
+      assert.deepEqual(snapshot.models[1]?.capabilities?.optionDescriptors, []);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("does not invent thinking support for a non-reasoning default model", () =>
+    Effect.gen(function* () {
+      const { spawner } = yield* makePiSpawner({
+        state: {
+          model: { provider: "test", id: "model", reasoning: false },
+          thinkingLevel: "high",
+        },
+        models: [{ provider: "test", id: "model", reasoning: false }],
+      });
+      const instance = yield* create().pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      );
+      yield* instance.snapshot.refresh;
+      assert.deepEqual(
+        (yield* instance.snapshot.getSnapshot).models[0]?.capabilities?.optionDescriptors,
+        [],
+      );
+    }).pipe(Effect.scoped),
   );
 
   it.effect(

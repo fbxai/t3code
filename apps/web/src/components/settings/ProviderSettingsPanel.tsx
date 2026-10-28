@@ -1,4 +1,5 @@
 import { SettingsGroup } from "./SettingsGroup";
+import { ProviderOutputPanel } from "./ProviderOutputPanel";
 import { RefreshIcon } from "~/components/ui/refresh-icon";
 import {
   AuthSettingsWriteScope,
@@ -575,6 +576,7 @@ export function EnvironmentProviderSettings({
   });
   const [isRefreshingProviders, setIsRefreshingProviders] = useState(false);
   const [isAddInstanceDialogOpen, setIsAddInstanceDialogOpen] = useState(false);
+  const [outputInstanceId, setOutputInstanceId] = useState<ProviderInstanceId | null>(null);
   const [selectedInstanceId, setSelectedInstanceId] = useState<ProviderInstanceId | null>(
     targetInstanceId ?? null,
   );
@@ -778,6 +780,10 @@ export function EnvironmentProviderSettings({
   const selectedRow =
     rows.find((row) => row.instanceId === selectedInstanceId) ??
     (targetInstanceMissing ? null : (rows[0] ?? null));
+  const outputRow = rows.find((row) => row.instanceId === outputInstanceId);
+  const outputProvider = serverProviders.find(
+    (provider) => provider.instanceId === outputInstanceId,
+  );
 
   const persistInstance = async (
     instanceId: ProviderInstanceId,
@@ -908,6 +914,7 @@ export function EnvironmentProviderSettings({
     updateModelPreferences: stableUpdateModelPreferences,
     toggleModelFavorite: stableToggleModelFavorite,
     selectInstance: setSelectedInstanceId,
+    showOutput: setOutputInstanceId,
   };
   // resolveModelPreferences falls back to a fresh `[]`; keep it stable for the rows.
   const favorites = settings.favorites.length > 0 ? settings.favorites : NO_FAVORITES;
@@ -1165,6 +1172,24 @@ export function EnvironmentProviderSettings({
           onCreated={setSelectedInstanceId}
         />
       ) : null}
+      {outputRow ? (
+        <>
+          <div aria-hidden className="h-80 max-h-[50dvh]" />
+          <ProviderOutputPanel
+            key={`${environmentId}:${outputRow.instanceId}`}
+            environmentId={environmentId}
+            environmentLabel={environmentLabel}
+            instanceId={outputRow.instanceId}
+            label={
+              outputRow.explicitInstance?.displayName ||
+              outputProvider?.displayName ||
+              String(outputRow.instanceId)
+            }
+            provider={outputProvider}
+            onClose={() => setOutputInstanceId(null)}
+          />
+        </>
+      ) : null}
     </>
   );
 }
@@ -1199,6 +1224,7 @@ interface ProviderInstanceRowActions {
   readonly updateModelPreferences: ReturnType<typeof useUpdateEnvironmentModelPreferences>;
   readonly toggleModelFavorite: ReturnType<typeof useToggleEnvironmentModelFavorite>;
   readonly selectInstance: (instanceId: ProviderInstanceId) => void;
+  readonly showOutput: (instanceId: ProviderInstanceId) => void;
 }
 
 const NO_MODELS: ReadonlyArray<string> = [];
@@ -1286,6 +1312,7 @@ function ProviderInstanceRow({
 
   return (
     <ProviderInstanceCard
+      onShowOutput={() => actions.showOutput(instanceId)}
       environmentId={environmentId}
       secretSources={secretSources}
       acpProjects={acpProjects}

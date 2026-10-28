@@ -894,7 +894,7 @@ const WsServerLogoutAcpRegistryRpc = Rpc.make(WS_METHODS.serverLogoutAcpRegistry
 });
 
 const WsServerGetTraceDiagnosticsRpc = Rpc.make(WS_METHODS.serverGetTraceDiagnostics, {
-  payload: Schema.Struct({}),
+  payload: Schema.Struct({ providerInstanceId: Schema.optionalKey(ProviderInstanceId) }),
   success: ServerTraceDiagnosticsResult,
   error: EnvironmentAuthorizationError,
 });

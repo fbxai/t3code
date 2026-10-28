@@ -1,3 +1,4 @@
+// @effect-diagnostics globalDate:off - Build IDs use the current UTC timestamp outside the app runtime.
 // @effect-diagnostics nodeBuiltinImport:off - Build orchestration runs outside the application runtime.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
@@ -42,6 +43,13 @@ if (import.meta.main) {
     encoding: "utf8",
   }).trim();
   run(zig, ["version"]);
+  // rustup installs targets for its compiler, which may differ from Homebrew's Rust on PATH.
+  const cargo = NodeChildProcess.execFileSync("rustup", ["which", "cargo"], {
+    encoding: "utf8",
+  }).trim();
+  const rustc = NodeChildProcess.execFileSync("rustup", ["which", "rustc"], {
+    encoding: "utf8",
+  }).trim();
   const version = localDesktopVersion(serverPackage.version, new Date());
   const stage = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-local-ssh-"));
   const archives = NodePath.join(stage, "archives");
@@ -58,7 +66,7 @@ if (import.meta.main) {
       NodeFS.writeFileSync(linker, resourceMonitorLinkerScript(zigTarget));
       NodeFS.chmodSync(linker, 0o700);
       run(
-        "cargo",
+        cargo,
         [
           "build",
           "--locked",
@@ -70,6 +78,7 @@ if (import.meta.main) {
         ],
         {
           ...process.env,
+          RUSTC: rustc,
           T3_BUILD_ZIG: zig,
           ...(zigTarget
             ? { [`CARGO_TARGET_${target.toUpperCase().replaceAll("-", "_")}_LINKER`]: linker }

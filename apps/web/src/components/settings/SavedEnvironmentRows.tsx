@@ -4,6 +4,7 @@ import {
   ChevronsLeftRightEllipsisIcon,
   EllipsisIcon,
   RouteIcon,
+  RefreshCwIcon,
   TerminalIcon,
 } from "lucide-react";
 import { useAtomValue } from "@effect/atom-react";
@@ -389,6 +390,25 @@ export function SavedBackendListRow({
             label={serverUpdateState.status === "failed" ? "Retry update" : "Update"}
             appearance="icon"
           />
+        ) : null}
+        {enabled ? (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  type="button"
+                  variant="ghost-muted"
+                  size="icon-xs"
+                  disabled={isRemoving || serverUpdateState.status === "running"}
+                  aria-label={`Reconnect ${environment.label}`}
+                  onClick={() => void retryNow(environmentId)}
+                >
+                  <RefreshCwIcon className="size-3.5" />
+                </Button>
+              }
+            />
+            <TooltipPopup side="top">Check connection and retry if needed</TooltipPopup>
+          </Tooltip>
         ) : null}
         <Tooltip>
           <TooltipTrigger

@@ -1,10 +1,12 @@
 import {
   type CustomModelSetting,
+  type ModelCapabilities,
   type ServerProvider,
   type ServerProviderModel,
 } from "@t3tools/contracts";
 import type { PiSettings } from "../settings.ts";
 import { causeErrorTag } from "@t3tools/shared/observability";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import { compareSemverVersions } from "@t3tools/shared/semver";
 import * as DateTime from "effect/DateTime";
@@ -48,6 +50,11 @@ import {
   withPiBuiltinSlashCommands,
   type PiDiscoveredCommands,
 } from "./commands.ts";
+import {
+  piProbeDiagnostics,
+  piProbeErrorMessage,
+  sanitizePiProbeText,
+} from "./probeDiagnostics.ts";
 
 const PI_PRESENTATION = {
   displayName: "Pi",
@@ -79,6 +86,7 @@ const PI_DEFAULT_MODEL: ServerProviderModel = {
 
 interface PiDiscovery extends PiDiscoveredCommands {
   readonly models: ReadonlyArray<ServerProviderModel>;
+  readonly defaultModelCapabilities: ModelCapabilities;
   readonly authenticated: boolean;
   /** Pi's active model when Pi lists no model of its provider, so it cannot start a turn. */
   readonly unavailableActiveModel: { readonly provider: string; readonly id: string } | undefined;
@@ -87,18 +95,16 @@ interface PiDiscovery extends PiDiscoveredCommands {
 function piModelsFromSettings(
   customModels: ReadonlyArray<CustomModelSetting> | undefined,
   discovered: ReadonlyArray<ServerProviderModel> = [],
+  defaultModelCapabilities = EMPTY_PI_MODEL_CAPABILITIES,
 ): ReadonlyArray<ServerProviderModel> {
   return providerModelsFromSettings(
-    [PI_DEFAULT_MODEL, ...discovered],
+    [{ ...PI_DEFAULT_MODEL, capabilities: defaultModelCapabilities }, ...discovered],
     customModels ?? [],
     EMPTY_PI_MODEL_CAPABILITIES,
   );
 }
 
-function parseDiscoveredModels(
-  data: unknown,
-  state: unknown,
-): Result.Result<ReadonlyArray<ServerProviderModel>, PiRpcError> {
+function parseDiscoveredModels(data: unknown, state: unknown) {
   const models = recordField(data, "models");
   if (!Array.isArray(models)) {
     return Result.fail(
@@ -110,6 +116,7 @@ function parseDiscoveredModels(
   const activeModelId = recordString(activeModel, "id");
   const seen = new Set<string>();
   const parsed: Array<ServerProviderModel> = [];
+  let defaultModel = activeModel;
   for (const model of models) {
     const provider = recordString(model, "provider");
     const id = recordString(model, "id");
@@ -121,6 +128,8 @@ function parseDiscoveredModels(
     const slug = `${provider}/${id}`;
     if (seen.has(slug)) continue;
     seen.add(slug);
+    const isActiveModel = provider === activeProvider && id === activeModelId;
+    if (isActiveModel) defaultModel = model;
     parsed.push({
       slug,
       name: recordString(model, "name") ?? slug,
@@ -128,13 +137,17 @@ function parseDiscoveredModels(
       isCustom: false,
       capabilities: thinkingCapabilitiesForPiModel(
         model,
-        provider === activeProvider && id === activeModelId
-          ? recordString(state, "thinkingLevel")
-          : undefined,
+        isActiveModel ? recordString(state, "thinkingLevel") : undefined,
       ),
     });
   }
-  return Result.succeed(parsed);
+  return Result.succeed({
+    models: parsed,
+    defaultModelCapabilities: thinkingCapabilitiesForPiModel(
+      defaultModel,
+      recordString(state, "thinkingLevel"),
+    ),
+  });
 }
 
 const makePiDiscoveryConnection = Effect.fnUntraced(function* (
@@ -176,7 +189,7 @@ const discoverPiViaRpc = Effect.fn("PiProviderStatus.discoverPiViaRpc")(function
   const commandsData = yield* connection
     .request({ type: "get_commands" })
     .pipe(Effect.orElseSucceed(() => undefined));
-  const discoveredModels = yield* Effect.fromResult(parseDiscoveredModels(modelsData, stateData));
+  const discovered = yield* Effect.fromResult(parseDiscoveredModels(modelsData, stateData));
   const { slashCommands, skills } = parsePiDiscoveredCommands(commandsData);
   // Pi lists only models of providers it holds credentials for, including extension, virtual and
   // --api-key ones. Turns need only the provider's credentials, so uncatalogued model ids still run.
@@ -184,14 +197,14 @@ const discoverPiViaRpc = Effect.fn("PiProviderStatus.discoverPiViaRpc")(function
   const activeProvider = recordString(activeModel, "provider");
   const activeModelId = recordString(activeModel, "id");
   return {
-    models: discoveredModels,
+    ...discovered,
     slashCommands: withPiBuiltinSlashCommands(slashCommands),
     skills,
-    authenticated: discoveredModels.length > 0,
+    authenticated: discovered.models.length > 0,
     unavailableActiveModel:
       activeProvider !== undefined &&
       activeModelId !== undefined &&
-      !discoveredModels.some((model) => model.subProvider === activeProvider)
+      !discovered.models.some((model) => model.subProvider === activeProvider)
         ? { provider: activeProvider, id: activeModelId }
         : undefined,
   } satisfies PiDiscovery;
@@ -350,6 +363,23 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
     });
   }
 
+  const command = piSettings.binaryPath || "pi";
+  const binaryLabel = `Pi CLI (\`${command}\`)`;
+  const serverCwd = yield* HostProcess.WorkingDirectory;
+  const hostname = yield* HostProcess.Hostname;
+  const platform = yield* HostProcess.Platform;
+  const versionDiagnostics = piProbeDiagnostics({
+    phase: "version",
+    command,
+    args: ["--version"],
+    environment,
+    cwd: serverCwd,
+    hostname,
+    platform,
+    timeoutMs: VERSION_PROBE_TIMEOUT_MS,
+  });
+  const versionRepro = ` Reproduce on ${hostname}: ${versionDiagnostics.commandLine}.`;
+  yield* Effect.logInfo("Pi provider probe started.", versionDiagnostics);
   const versionResult = yield* runPiVersionCommand(piSettings, environment).pipe(
     Effect.timeoutOption(VERSION_PROBE_TIMEOUT_MS),
     Effect.result,
@@ -357,7 +387,11 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
 
   if (Result.isFailure(versionResult)) {
     const error = versionResult.failure;
-    yield* Effect.logWarning("Pi CLI health check failed.", { errorTag: error._tag });
+    yield* Effect.logWarning("Pi provider probe failed.", {
+      ...versionDiagnostics,
+      errorTag: error._tag,
+      reason: piProbeErrorMessage(error, environment),
+    });
     return buildServerProvider({
       presentation: PI_PRESENTATION,
       enabled: piSettings.enabled,
@@ -369,13 +403,18 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
         status: "error",
         auth: { status: "unknown" },
         message: isCommandMissingCause(error)
-          ? "Pi CLI (`pi`) is not installed or not on PATH. Install with `npm install -g --ignore-scripts @earendil-works/pi-coding-agent`."
-          : "Failed to execute Pi CLI health check.",
+          ? `${binaryLabel} is not installed or not on PATH. ${
+              command === "pi"
+                ? "Install with `npm install -g --ignore-scripts @earendil-works/pi-coding-agent`."
+                : "Check this instance's Binary path in Settings → Providers on the server environment."
+            }${versionRepro}`
+          : `Failed to execute the health check for ${binaryLabel}.${versionRepro}`,
       },
     });
   }
 
   if (Option.isNone(versionResult.success)) {
+    yield* Effect.logWarning("Pi provider probe timed out.", versionDiagnostics);
     return buildServerProvider({
       presentation: PI_PRESENTATION,
       enabled: piSettings.enabled,
@@ -386,13 +425,22 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
         version: null,
         status: "error",
         auth: { status: "unknown" },
-        message: "Pi CLI is installed but timed out while running `pi --version`.",
+        message: `${binaryLabel} is installed but timed out while running \`${command} --version\`.${versionRepro}`,
       },
     });
   }
 
   const versionOutput = versionResult.success.value;
   const version = parseGenericCliVersion(`${versionOutput.stdout}\n${versionOutput.stderr}`);
+  const logVersion =
+    versionOutput.code === 0 && version !== null ? Effect.logInfo : Effect.logWarning;
+  yield* logVersion("Pi provider version check completed.", {
+    ...versionDiagnostics,
+    exitCode: versionOutput.code,
+    version,
+    stdout: sanitizePiProbeText(versionOutput.stdout, environment),
+    stderr: sanitizePiProbeText(versionOutput.stderr, environment),
+  });
   if (versionOutput.code !== 0) {
     return buildServerProvider({
       presentation: PI_PRESENTATION,
@@ -404,7 +452,7 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
         version,
         status: "error",
         auth: { status: "unknown" },
-        message: "Pi CLI is installed but failed to run.",
+        message: `${binaryLabel} is installed but \`${command} --version\` exited with code ${versionOutput.code}.${versionRepro}`,
       },
     });
   }
@@ -420,7 +468,7 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
         version: null,
         status: "error",
         auth: { status: "unknown" },
-        message: `T3 Code could not determine the Pi version. Pi ${MINIMUM_PI_VERSION} or newer is required.`,
+        message: `T3 Code could not determine the Pi version. Pi ${MINIMUM_PI_VERSION} or newer is required.${versionRepro}`,
       },
     });
   }
@@ -436,7 +484,7 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
         version,
         status: "error",
         auth: { status: "unknown" },
-        message: `Pi ${version} is unsupported. Update to Pi ${MINIMUM_PI_VERSION} or newer.`,
+        message: `Pi ${version} is unsupported. Update to Pi ${MINIMUM_PI_VERSION} or newer.${versionRepro}`,
       },
     });
   }
@@ -458,6 +506,25 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
     });
   }
 
+  const discoveryLaunch = buildPiRpcLaunch({
+    launchArgs: resolvedLaunchArgs.args,
+    environment,
+    mcpSession: undefined,
+    extensionPath: undefined,
+    ephemeral: true,
+  });
+  const rpcDiagnostics = piProbeDiagnostics({
+    phase: "rpc-discovery",
+    command,
+    args: discoveryLaunch.args,
+    environment: discoveryLaunch.env,
+    cwd: cwd ?? serverCwd,
+    hostname,
+    platform,
+    timeoutMs: PI_RPC_DISCOVERY_TIMEOUT_MS,
+  });
+  const rpcRepro = ` Reproduce on ${hostname}: ${rpcDiagnostics.commandLine}. See the server's Pi provider probe log for stdin requests and environment details.`;
+  yield* Effect.logInfo("Pi provider probe started.", rpcDiagnostics);
   const discoveryExit = yield* discoverPiViaRpc(
     piSettings,
     environment,
@@ -466,7 +533,9 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
   ).pipe(Effect.timeoutOption(PI_RPC_DISCOVERY_TIMEOUT_MS), Effect.exit);
   if (Exit.isFailure(discoveryExit)) {
     yield* Effect.logWarning("Pi RPC discovery failed.", {
+      ...rpcDiagnostics,
       errorTag: causeErrorTag(discoveryExit.cause),
+      reason: piProbeErrorMessage(discoveryExit.cause, discoveryLaunch.env, discoveryLaunch.args),
     });
     return buildServerProvider({
       presentation: PI_PRESENTATION,
@@ -478,12 +547,12 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
         version,
         status: "ready",
         auth: { status: "unknown" },
-        message:
-          "Pi is available, but T3 Code could not refresh its models and commands. The live session will retry startup.",
+        message: `Pi is available, but T3 Code could not refresh its models and commands. The live session will retry startup.${rpcRepro}`,
       },
     });
   }
   if (Option.isNone(discoveryExit.value)) {
+    yield* Effect.logWarning("Pi provider probe timed out.", rpcDiagnostics);
     return buildServerProvider({
       presentation: PI_PRESENTATION,
       enabled: piSettings.enabled,
@@ -494,14 +563,17 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
         version,
         status: "ready",
         auth: { status: "unknown" },
-        message:
-          "Pi is available, but model and command discovery needs interactive input. The live session will handle it.",
+        message: `Pi is available, but model and command discovery needs interactive input. The live session will handle it.${rpcRepro}`,
       },
     });
   }
 
   const discovery = discoveryExit.value.value;
-  const models = piModelsFromSettings(piSettings.customModels, discovery.models);
+  const models = piModelsFromSettings(
+    piSettings.customModels,
+    discovery.models,
+    discovery.defaultModelCapabilities,
+  );
   const message = !discovery.authenticated
     ? "Pi has no usable models. Run `pi` in a terminal and use /login, or configure an API key in ~/.pi/agent."
     : discovery.unavailableActiveModel === undefined

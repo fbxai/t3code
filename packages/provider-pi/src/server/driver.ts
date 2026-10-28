@@ -14,6 +14,8 @@ import { piUsageReader } from "./usage.ts";
 import { makePiTextGeneration } from "./textGeneration.ts";
 import { PiAdapterV2Driver, type PiAdapterV2DriverEnv } from "./adapter.ts";
 import { ProviderDriverError } from "@t3tools/provider-core/server/errors";
+import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import {
   buildInitialPiProviderSnapshot,
   checkPiProviderStatus,
@@ -66,6 +68,11 @@ const withInstanceIdentity =
   }) =>
   (snapshot: ServerProviderDraft): ServerProvider => ({
     ...snapshot,
+    models: snapshot.models.map((model) =>
+      model.slug === "default" && model.name === "Pi default" && input.displayName
+        ? { ...model, name: `${input.displayName} default` }
+        : model,
+    ),
     instanceId: input.instanceId,
     driver: DRIVER_KIND,
     ...(input.displayName ? { displayName: input.displayName } : {}),
@@ -108,7 +115,11 @@ export const PiDriver: ProviderDriver<PiSettings, PiDriverEnv, Path.Path> = {
       accentColor,
       continuationGroupKey: continuationIdentity.continuationKey,
     });
-    const effectiveConfig = { ...config, enabled } satisfies PiSettings;
+    const effectiveConfig = {
+      ...config,
+      enabled,
+      binaryPath: expandHomePath(config.binaryPath, yield* HostProcess.HomeDirectory),
+    } satisfies PiSettings;
     const resolveMaintenance = yield* makeCachedProviderMaintenanceResolution(
       resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
         binaryPath: effectiveConfig.binaryPath,
@@ -126,7 +137,7 @@ export const PiDriver: ProviderDriver<PiSettings, PiDriverEnv, Path.Path> = {
       accentColor,
       environment,
       enabled,
-      config,
+      config: effectiveConfig,
     }).pipe(
       Effect.mapError(
         (cause) =>
@@ -141,6 +152,10 @@ export const PiDriver: ProviderDriver<PiSettings, PiDriverEnv, Path.Path> = {
     const textGeneration = yield* makePiTextGeneration(effectiveConfig, processEnv);
 
     const checkProvider = checkPiProviderStatus(effectiveConfig, processEnv, cwd).pipe(
+      Effect.annotateLogs({
+        providerInstanceId: instanceId,
+        providerDisplayName: displayName ?? "Pi",
+      }),
       Effect.map(stampIdentity),
       Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
     );

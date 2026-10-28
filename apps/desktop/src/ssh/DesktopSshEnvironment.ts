@@ -145,26 +145,25 @@ export const make = Effect.gen(function* () {
   const passwordPrompt = SshAuth.SshPasswordPrompt.of(makePasswordPrompt(prompts));
   const logs = createSshLogCache();
 
-  const capture = <A, E, R>(
+  const capture = Effect.fn("desktop.ssh.capture")(function* <A, E, R>(
     target: DesktopSshEnvironmentTarget,
     operation: Effect.Effect<A, E, R>,
-  ) =>
-    Effect.gen(function* () {
-      const entry = logs.get(targetConnectionKey(target), yield* Clock.currentTimeMillis);
-      const logger = Logger.make((options) => {
-        const record = Logger.formatStructured.log(options);
-        logs.append(
-          entry,
-          `${record.timestamp} ${record.level} ${typeof record.message === "string" ? record.message : JSON.stringify(record.message)}${record.cause ? `\n${record.cause}` : ""}`,
-          options.date.getTime(),
-        );
-      });
-      return yield* operation.pipe(
-        Effect.tapCause((cause) => Effect.logError("SSH operation failed", Cause.pretty(cause))),
-        Effect.provide(Logger.layer([logger], { mergeWithExisting: true })),
-        Effect.provideService(References.MinimumLogLevel, "Debug"),
+  ) {
+    const entry = logs.get(targetConnectionKey(target), yield* Clock.currentTimeMillis);
+    const logger = Logger.make((options) => {
+      const record = Logger.formatStructured.log(options);
+      logs.append(
+        entry,
+        `${record.timestamp} ${record.level} ${typeof record.message === "string" ? record.message : JSON.stringify(record.message)}${record.cause ? `\n${record.cause}` : ""}`,
+        options.date.getTime(),
       );
     });
+    return yield* operation.pipe(
+      Effect.tapCause((cause) => Effect.logError("SSH operation failed", Cause.pretty(cause))),
+      Effect.provide(Logger.layer([logger], { mergeWithExisting: true })),
+      Effect.provideService(References.MinimumLogLevel, "Debug"),
+    );
+  });
 
   return DesktopSshEnvironment.of({
     readLogs: Effect.fn("desktop.ssh.readLogs")(function* (target, refreshRemote = false) {

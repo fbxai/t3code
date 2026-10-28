@@ -4,10 +4,17 @@ import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
+import * as Logger from "effect/Logger";
+import * as Layer from "effect/Layer";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as PlatformError from "effect/PlatformError";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
+import * as TestClock from "effect/testing/TestClock";
 
 import { checkPiProviderStatus, MINIMUM_PI_VERSION } from "./status.ts";
 
@@ -122,6 +129,180 @@ const settings = {
 } as const;
 
 describe("PiProvider", () => {
+  it.effect("records a version timeout with its reproduction command", () => {
+    const records: string[] = [];
+    const logger = Logger.make((options) =>
+      records.push(JSON.stringify(Logger.formatStructured.log(options))),
+    );
+    return Effect.gen(function* () {
+      const started = yield* Deferred.make<void>();
+      const spawner = ChildProcessSpawner.make(() =>
+        Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never)),
+      );
+      const check = yield* Effect.forkChild(
+        checkPiProviderStatus({ ...settings, binaryPath: "omp" }).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        ),
+      );
+      yield* Deferred.await(started);
+      yield* TestClock.adjust("4 seconds");
+      const snapshot = yield* Fiber.join(check);
+      assert.equal(snapshot.status, "error");
+      assert.include(snapshot.message ?? "", "omp --version");
+      const log = records.join("\n");
+      assert.include(log, "Pi provider probe timed out.");
+      assert.include(log, '"timeoutMs":4000');
+      assert.include(log, "reproduce");
+    }).pipe(
+      Effect.provide(
+        Layer.merge(NodeServices.layer, Logger.layer([logger], { mergeWithExisting: false })),
+      ),
+    );
+  });
+
+  it.effect("logs enough server context to reproduce a missing custom executable", () => {
+    const records: string[] = [];
+    const logger = Logger.make((options) =>
+      records.push(JSON.stringify(Logger.formatStructured.log(options))),
+    );
+    const spawner = ChildProcessSpawner.make(() =>
+      Effect.fail(
+        PlatformError.systemError({
+          _tag: "NotFound",
+          module: "ChildProcess",
+          method: "spawn",
+          description: "spawn omp ENOENT",
+        }),
+      ),
+    );
+    return Effect.gen(function* () {
+      const snapshot = yield* checkPiProviderStatus(
+        { ...settings, binaryPath: "omp" },
+        {
+          PATH: "/server-only/bin",
+          HOME: "/home/operator",
+          API_KEY: "never-log-this-secret",
+        },
+      );
+      const log = records.join("\n");
+      assert.include(log, "Pi provider probe failed.");
+      assert.include(log, "spawn omp ENOENT");
+      assert.include(log, '"phase":"version"');
+      assert.include(log, '"cwd":"/server cwd"');
+      assert.include(log, '"PATH":"/server-only/bin"');
+      assert.include(log, '"timeoutMs":4000');
+      assert.include(log, '"hostname":"pi-a6000"');
+      assert.notInclude(log, "never-log-this-secret");
+      assert.include(snapshot.message ?? "", "Reproduce on pi-a6000:");
+    }).pipe(
+      Effect.provide(
+        Layer.merge(NodeServices.layer, Logger.layer([logger], { mergeWithExisting: false })),
+      ),
+      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      Effect.provideService(HostProcess.WorkingDirectory, "/server cwd"),
+      Effect.provideService(HostProcess.Hostname, "pi-a6000"),
+    );
+  });
+
+  it.effect("logs version-command stderr and RPC reproduction without logging secrets", () => {
+    const records: string[] = [];
+    const logger = Logger.make((options) =>
+      records.push(JSON.stringify(Logger.formatStructured.log(options))),
+    );
+    return Effect.gen(function* () {
+      const environment = { PATH: "/server/bin", API_KEY: "bare-secret" };
+      yield* checkPiProviderStatus(settings, environment).pipe(
+        Effect.provideService(
+          ChildProcessSpawner.ChildProcessSpawner,
+          ChildProcessSpawner.make(() =>
+            Effect.succeed(
+              processHandle({
+                stderr: "invalid config: bare-secret api_key=other-secret",
+                exitCode: 2,
+              }),
+            ),
+          ),
+        ),
+      );
+      const failureLog = records.join("\n");
+      assert.include(failureLog, '"exitCode":2');
+      assert.include(failureLog, "invalid config");
+      assert.notInclude(failureLog, "bare-secret");
+      assert.notInclude(failureLog, "other-secret");
+      records.length = 0;
+      yield* checkPiProviderStatus(
+        { ...settings, binaryPath: "omp" },
+        environment,
+        "/project",
+      ).pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, piProbeSpawner("0.84.3")),
+      );
+      const rpcLog = records.join("\n");
+      assert.include(rpcLog, '"phase":"rpc-discovery"');
+      assert.include(rpcLog, '"args":["--mode","rpc","--no-session"]');
+      assert.include(rpcLog, '"cwd":"/project"');
+      assert.include(rpcLog, "get_state");
+      assert.include(rpcLog, "get_available_models");
+      assert.include(rpcLog, "get_commands");
+      assert.include(rpcLog, "Pi RPC discovery failed.");
+    }).pipe(
+      Effect.provide(
+        Layer.merge(NodeServices.layer, Logger.layer([logger], { mergeWithExisting: false })),
+      ),
+    );
+  });
+
+  it.effect.each(["pi", "/custom/Oh My Pi/omp"])(
+    "reports the executable actually checked when %s is missing",
+    (binaryPath) =>
+      Effect.gen(function* () {
+        const spawner = ChildProcessSpawner.make((command) => {
+          assert.isTrue(ChildProcess.isStandardCommand(command));
+          if (ChildProcess.isStandardCommand(command)) {
+            assert.equal(command.command, binaryPath);
+            assert.deepEqual(command.args, ["--version"]);
+          }
+          return Effect.fail(
+            PlatformError.systemError({
+              _tag: "NotFound",
+              module: "ChildProcess",
+              method: "spawn",
+            }),
+          );
+        });
+        const snapshot = yield* checkPiProviderStatus({ ...settings, binaryPath }).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        );
+        assert.equal(snapshot.installed, false);
+        assert.equal(snapshot.status, "error");
+        assert.include(snapshot.message ?? "", `Pi CLI (\`${binaryPath}\`)`);
+        if (binaryPath === "pi") {
+          assert.include(snapshot.message ?? "", "npm install");
+        } else {
+          assert.include(snapshot.message ?? "", "Binary path");
+          assert.notInclude(snapshot.message ?? "", "npm install");
+        }
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect(
+    "distinguishes a custom executable's failed version command from a missing install",
+    () =>
+      Effect.gen(function* () {
+        const binaryPath = "/custom/bin/omp";
+        const spawner = ChildProcessSpawner.make(() =>
+          Effect.succeed(processHandle({ stderr: "configuration error", exitCode: 2 })),
+        );
+        const snapshot = yield* checkPiProviderStatus({ ...settings, binaryPath }).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        );
+        assert.equal(snapshot.installed, true);
+        assert.equal(snapshot.status, "error");
+        assert.include(snapshot.message ?? "", `${binaryPath} --version`);
+        assert.include(snapshot.message ?? "", "exited with code 2");
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("requires the first published Pi version with entries and settlement hooks", () =>
     Effect.gen(function* () {
       const snapshot = yield* checkPiProviderStatus(settings).pipe(

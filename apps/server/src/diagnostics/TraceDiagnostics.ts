@@ -1,4 +1,5 @@
 import type {
+  ProviderInstanceId,
   ServerTraceDiagnosticsErrorKind,
   ServerTraceDiagnosticsFailureSummary,
   ServerTraceDiagnosticsLogEvent,
@@ -40,6 +41,7 @@ export interface TraceDiagnosticsOptions {
   readonly maxFiles: number;
   readonly slowSpanThresholdMs?: number;
   readonly readAt?: DateTime.Utc;
+  readonly providerInstanceId?: ProviderInstanceId;
 }
 
 export class TraceFileReadError extends Schema.TaggedError<TraceFileReadError>()(
@@ -154,6 +156,7 @@ function makeEmptyDiagnostics(input: {
     commonFailures: [],
     latestFailures: [],
     latestWarningAndErrorLogs: [],
+    providerLogs: [],
     partialFailure: input.partialFailure ? Option.some(true) : Option.none(),
     error: Option.fromNullishOr(input.error),
   };
@@ -197,6 +200,7 @@ const latestSeenFirst = (
 
 export function makeTraceDiagnosticsAggregator(
   slowSpanThresholdMs = DEFAULT_SLOW_SPAN_THRESHOLD_MS,
+  providerInstanceId?: ProviderInstanceId,
 ) {
   let parseErrorCount = 0;
   let recordCount = 0;
@@ -214,6 +218,7 @@ export function makeTraceDiagnosticsAggregator(
   const latestFailures: ServerTraceDiagnosticsRecentFailure[] = [];
   const slowestSpans: ServerTraceDiagnosticsSpanOccurrence[] = [];
   const latestWarningAndErrorLogs: ServerTraceDiagnosticsLogEvent[] = [];
+  const providerLogs: ServerTraceDiagnosticsLogEvent[] = [];
   const logLevelCounts: Record<string, number> = {};
 
   const addLine = (line: string) => {
@@ -301,6 +306,15 @@ export function makeTraceDiagnosticsAggregator(
         if (!level) continue;
 
         logLevelCounts[level] = (logLevelCounts[level] ?? 0) + 1;
+        const seenAt = unixNanoToDateTime(rawEvent.timeUnixNano) ?? endedAt;
+        const message = toStringValue(rawEvent.name)?.trim() ?? "Log event";
+        const event = { spanName: name, level, message, seenAt, traceId, spanId };
+        if (
+          providerInstanceId !== undefined &&
+          attributes["providerInstanceId"] === providerInstanceId
+        ) {
+          insertBounded(providerLogs, event, RECENT_LIMIT, latestSeenFirst);
+        }
         const normalizedLevel = level.toLowerCase();
         if (
           normalizedLevel !== "warning" &&
@@ -311,14 +325,7 @@ export function makeTraceDiagnosticsAggregator(
           continue;
         }
 
-        const seenAt = unixNanoToDateTime(rawEvent.timeUnixNano) ?? endedAt;
-        const message = toStringValue(rawEvent.name)?.trim() ?? "Log event";
-        insertBounded(
-          latestWarningAndErrorLogs,
-          { spanName: name, level, message, seenAt, traceId, spanId },
-          RECENT_LIMIT,
-          latestSeenFirst,
-        );
+        insertBounded(latestWarningAndErrorLogs, event, RECENT_LIMIT, latestSeenFirst);
       }
     }
   };
@@ -368,6 +375,7 @@ export function makeTraceDiagnosticsAggregator(
         .slice(0, TOP_LIMIT),
       latestFailures,
       latestWarningAndErrorLogs,
+      providerLogs,
       partialFailure: input.partialFailure ? Option.some(true) : Option.none(),
       error: Option.fromNullishOr(input.error),
     };
@@ -411,7 +419,10 @@ export const make = Effect.gen(function* () {
       const readAt = options.readAt ?? (yield* DateTime.now);
       const slowSpanThresholdMs = options.slowSpanThresholdMs ?? DEFAULT_SLOW_SPAN_THRESHOLD_MS;
       const paths = toRotatedTracePaths(options.traceFilePath, options.maxFiles);
-      const aggregator = makeTraceDiagnosticsAggregator(slowSpanThresholdMs);
+      const aggregator = makeTraceDiagnosticsAggregator(
+        slowSpanThresholdMs,
+        options.providerInstanceId,
+      );
       const results = yield* Effect.forEach(
         paths,
         (path) =>

@@ -1781,55 +1781,66 @@ describe("PiAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
-  it.effect("resets applied thinking when returning to Pi default", () =>
-    Effect.gen(function* () {
-      const fake = yield* makeFakePi;
-      fake.queueState({
-        model: { provider: "xai", id: "grok-4.6" },
-        thinkingLevel: "medium",
-        sessionFile: FAKE_SESSION_FILE,
-        sessionId: "abc",
-      });
-      const { runtime, takeEvent } = yield* openRuntime(fake);
-      const providerThread = yield* runtime.ensureThread({
-        threadId: THREAD_ID,
-        modelSelection: modelSelection("default"),
-        runtimePolicy,
-      });
+  it.effect.each(["default", "xai/grok-4.6"])(
+    "applies and resets thinking on the default entry after selecting %s",
+    (selectedModel) =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        fake.queueState({
+          model: { provider: "xai", id: "grok-4.6" },
+          thinkingLevel: "medium",
+          sessionFile: FAKE_SESSION_FILE,
+          sessionId: "abc",
+        });
+        const { runtime, takeEvent } = yield* openRuntime(fake);
+        const providerThread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
 
-      yield* startTurn(runtime, providerThread, "default", [], "Hello pi", {
-        instanceId: PI_INSTANCE_ID,
-        model: "xai/grok-4.6",
-        options: [{ id: "thinking", value: "high" }],
-      });
-      const modelRequest = yield* fake.takeRequest("set_model");
-      assert.equal(modelRequest["provider"], "xai");
-      assert.equal(modelRequest["modelId"], "grok-4.6");
-      const levelRequest = yield* fake.takeRequest("set_thinking_level");
-      assert.equal(levelRequest["level"], "high");
-      yield* fake.emit({ type: "agent_start" });
-      yield* fake.emit({ type: "agent_end", messages: [], willRetry: false });
-      yield* fake.emit({ type: "agent_settled" });
-      yield* takeEvent((event) => event.type === "turn.terminal");
-
-      yield* startTurn(
-        runtime,
-        providerThread,
-        "default",
-        [],
-        "Hello pi",
-        {
+        // An explicit effort can target the inherited default or a concrete model.
+        yield* startTurn(runtime, providerThread, "default", [], "Hello pi", {
           instanceId: PI_INSTANCE_ID,
-          model: "default",
-        },
-        2,
-      );
-      const replayModel = yield* fake.takeRequest("set_model");
-      assert.equal(replayModel["provider"], "xai");
-      assert.equal(replayModel["modelId"], "grok-4.6");
-      const resetLevel = yield* fake.takeRequest("set_thinking_level");
-      assert.equal(resetLevel["level"], "medium");
-    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+          model: selectedModel,
+          options: [{ id: "thinking", value: "high" }],
+        });
+        if (selectedModel !== "default") {
+          const modelRequest = yield* fake.takeRequest("set_model");
+          assert.equal(modelRequest["provider"], "xai");
+          assert.equal(modelRequest["modelId"], "grok-4.6");
+        }
+        const levelRequest = yield* fake.takeRequest("set_thinking_level");
+        assert.equal(levelRequest["level"], "high");
+        yield* fake.emit({ type: "agent_start" });
+        yield* fake.emit({ type: "agent_end", messages: [], willRetry: false });
+        yield* fake.emit({ type: "agent_settled" });
+        yield* takeEvent((event) => event.type === "turn.terminal");
+
+        // Back to Pi default with no explicit thinking choice of its own.
+        yield* startTurn(
+          runtime,
+          providerThread,
+          "default",
+          [],
+          "Hello pi",
+          {
+            instanceId: PI_INSTANCE_ID,
+            model: "default",
+          },
+          2,
+        );
+        if (selectedModel !== "default") {
+          const replayModel = yield* fake.takeRequest("set_model");
+          assert.equal(replayModel["provider"], "xai");
+          assert.equal(replayModel["modelId"], "grok-4.6");
+        }
+        const resetLevel = yield* fake.takeRequest("set_thinking_level");
+        assert.equal(resetLevel["level"], "medium");
+        if (selectedModel === "default") {
+          assert.isFalse(fake.allRequests().some((request) => request.type === "set_model"));
+        }
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect.each([

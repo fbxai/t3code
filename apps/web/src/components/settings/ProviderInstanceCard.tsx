@@ -631,6 +631,7 @@ interface ProviderInstanceCardProps {
   readonly mode: "list" | "editor";
   readonly selected?: boolean | undefined;
   readonly onSelect?: (() => void) | undefined;
+  readonly onShowOutput?: (() => void) | undefined;
   readonly readOnly?: boolean | undefined;
   readonly canWriteSettings?: boolean;
   readonly onUpdate: (nextInstance: ProviderInstanceConfig) => void;
@@ -678,6 +679,7 @@ export function ProviderInstanceCard({
   mode,
   selected = false,
   onSelect,
+  onShowOutput,
   readOnly = false,
   canWriteSettings = true,
   onUpdate,
@@ -905,7 +907,21 @@ export function ProviderInstanceCard({
       : compatibility?.status === "unsupported"
         ? "Unsupported"
         : "Limited support"
-    : summary.detail;
+    : onShowOutput
+      ? null
+      : summary.detail;
+  const outputAction = onShowOutput ? (
+    <span className="pointer-events-auto shrink-0">
+      <Button
+        size="xs"
+        variant="ghost-muted"
+        onClick={onShowOutput}
+        aria-label={`Show logs / errors for ${displayName}`}
+      >
+        Show logs / errors
+      </Button>
+    </span>
+  ) : null;
   const editorStatusNode =
     isAuthenticated && authEmail ? (
       <>
@@ -1163,6 +1179,7 @@ export function ProviderInstanceCard({
           {editorStatusNode}
         </div>
       </ProviderStatusDiagnostic>
+      {outputAction}
       {urlAuthAction && onAcceptUrlAuth ? (
         <div className="grid max-w-xl gap-1.5 pt-1 text-xs">
           <p>{urlAuthAction.message}</p>
