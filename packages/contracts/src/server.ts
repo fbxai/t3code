@@ -1,5 +1,6 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import { ServerTailscaleState } from "./tailscale.ts";
 import { AcpRegistryUrlAuthAction } from "./acpRegistry.ts";
 import {
   type EnvironmentMachineKind,
@@ -608,6 +609,7 @@ export const ServerEventLoopStall = Schema.Struct({
 export type ServerEventLoopStall = typeof ServerEventLoopStall.Type;
 
 export const ServerConfig = Schema.Struct({
+  tailscaleHttps: Schema.optionalKey(ServerTailscaleState),
   environment: ExecutionEnvironmentDescriptor,
   auth: ServerAuthDescriptor,
   cwd: TrimmedNonEmptyString,

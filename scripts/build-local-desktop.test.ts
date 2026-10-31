@@ -5,8 +5,80 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as Schema from "effect/Schema";
 
 import { localDesktopVersion, resourceMonitorLinkerScript } from "./build-local-desktop.ts";
+import { releasePackageFiles } from "./update-release-package-versions.ts";
+
+const decodeObservedVersion = Schema.decodeSync(
+  Schema.fromJsonString(
+    Schema.Struct({ appVersion: Schema.String, versions: Schema.Array(Schema.String) }),
+  ),
+);
+
+it("aligns the compiled preview version and restores manifests after a failed build", () => {
+  const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-build-version-"));
+  try {
+    NodeFS.mkdirSync(NodePath.join(root, "scripts"));
+    for (const file of ["build-local-desktop.ts", "update-release-package-versions.ts"]) {
+      NodeFS.copyFileSync(new URL(file, import.meta.url), NodePath.join(root, "scripts", file));
+    }
+    NodeFS.symlinkSync(
+      new URL("node_modules", import.meta.url).pathname,
+      NodePath.join(root, "scripts/node_modules"),
+    );
+    NodeFS.copyFileSync(
+      new URL("../package.json", import.meta.url),
+      NodePath.join(root, "package.json"),
+    );
+    const original = '{"version":"0.1.3","private":true}\n';
+    for (const file of releasePackageFiles) {
+      NodeFS.mkdirSync(NodePath.dirname(NodePath.join(root, file)), { recursive: true });
+      NodeFS.writeFileSync(NodePath.join(root, file), original);
+    }
+    const bin = NodePath.join(root, "bin");
+    NodeFS.mkdirSync(bin);
+    const commands = {
+      mise: `console.log(${JSON.stringify(NodePath.join(bin, "zig"))});`,
+      zig: 'console.log("0.15.2");',
+      rustup: 'console.log("/unused/" + process.argv[3]);',
+      docker: 'console.log("linux/aarch64");',
+      vp: `
+import * as fs from "node:fs";
+fs.writeFileSync("observed.json", JSON.stringify({
+  versions: ${JSON.stringify(releasePackageFiles)}.map(file => JSON.parse(fs.readFileSync(file)).version),
+  appVersion: process.env.APP_VERSION,
+}));
+process.exit(42);
+`,
+    };
+    for (const [command, script] of Object.entries(commands)) {
+      NodeFS.writeFileSync(NodePath.join(bin, command), `#!/usr/bin/env node\n${script}`);
+      NodeFS.chmodSync(NodePath.join(bin, command), 0o755);
+    }
+    const result = NodeChildProcess.spawnSync(
+      process.execPath,
+      ["scripts/build-local-desktop.ts"],
+      {
+        cwd: root,
+        env: { ...process.env, PATH: `${bin}${NodePath.delimiter}${process.env.PATH ?? ""}` },
+        encoding: "utf8",
+      },
+    );
+    expect(result.status).toBe(1);
+    expect(NodeFS.existsSync(NodePath.join(root, "observed.json")), result.stderr).toBe(true);
+    const observed = decodeObservedVersion(
+      NodeFS.readFileSync(NodePath.join(root, "observed.json"), "utf8"),
+    );
+    expect(observed.appVersion).toMatch(/^0\.1\.3-preview\.\d{8}\.\d+$/);
+    expect(observed.versions).toEqual(releasePackageFiles.map(() => observed.appVersion));
+    for (const file of releasePackageFiles) {
+      expect(NodeFS.readFileSync(NodePath.join(root, file), "utf8")).toBe(original);
+    }
+  } finally {
+    NodeFS.rmSync(root, { recursive: true, force: true });
+  }
+});
 
 it("preserves linker arguments while filtering the flag Zig rejects", () => {
   const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-linker-"));

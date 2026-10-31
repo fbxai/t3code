@@ -1,3 +1,4 @@
+import { EnvironmentId } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it as effectIt } from "@effect/vitest";
 import type * as NodeOS from "node:os";
@@ -12,6 +13,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import * as ServerConfig from "../config.ts";
 import * as DirectEndpoints from "./DirectEndpoints.ts";
+import * as TailscaleAccess from "./TailscaleAccess.ts";
 import { resolveBoundEndpoints } from "./DirectEndpoints.ts";
 
 const INTERFACES: ReturnType<typeof NodeOS.networkInterfaces> = {
@@ -192,11 +194,16 @@ const layerTailscaleUp = Layer.succeed(
   ),
 );
 
-const layerServeProbe = (status: number) =>
+const layerServeProbe = (status: number, environmentId: string) =>
   Layer.succeed(
     HttpClient.HttpClient,
     HttpClient.make((request) =>
-      Effect.succeed(HttpClientResponse.fromWeb(request, new Response(null, { status }))),
+      Effect.succeed(
+        HttpClientResponse.fromWeb(
+          request,
+          new Response(JSON.stringify({ environmentId }), { status }),
+        ),
+      ),
     ),
   );
 
@@ -213,23 +220,41 @@ const layerServeConfig = Layer.effect(
   Layer.provide(NodeServices.layer),
 );
 
-const resolveWithServe = (probeStatus: number) =>
-  Effect.flatMap(DirectEndpoints.DirectEndpoints, (service) => service.resolve()).pipe(
+const resolveWithServe = (probeStatus: number, environmentId = "this-environment") =>
+  Effect.flatMap(DirectEndpoints.DirectEndpoints, (service) =>
+    service.resolve(EnvironmentId.make("this-environment")),
+  ).pipe(
     Effect.provide(
       DirectEndpoints.layer.pipe(
         Layer.provide(
-          Layer.mergeAll(layerServeConfig, layerTailscaleUp, layerServeProbe(probeStatus)),
+          Layer.mergeAll(
+            layerServeConfig,
+            layerTailscaleUp,
+            layerServeProbe(probeStatus, environmentId),
+            Layer.mock(TailscaleAccess.TailscaleAccess)({
+              getState: Effect.succeed({
+                enabled: true,
+                port: 443,
+                url: "https://bb-1.tail1234.ts.net/",
+                error: null,
+              }),
+            }),
+          ),
         ),
       ),
     ),
   );
 
 describe("DirectEndpoints Tailscale Serve", () => {
-  effectIt.effect("lists the tailnet name once Serve answers for this server", () =>
+  effectIt.effect.each([
+    {
+      environmentId: "this-environment",
+      expected: [{ kind: "tailnet", httpBaseUrl: "https://bb-1.tail1234.ts.net/" }],
+    },
+    { environmentId: "another-environment", expected: [] },
+  ])("advertises only the matching environment: $environmentId", ({ environmentId, expected }) =>
     Effect.gen(function* () {
-      expect(yield* resolveWithServe(200)).toEqual([
-        { kind: "tailnet", httpBaseUrl: "https://bb-1.tail1234.ts.net/" },
-      ]);
+      expect(yield* resolveWithServe(200, environmentId)).toEqual(expected);
     }),
   );
 

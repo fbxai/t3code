@@ -1,4 +1,4 @@
-import type { ServerDirectEndpoint } from "@t3tools/contracts";
+import type { EnvironmentId, ServerDirectEndpoint } from "@t3tools/contracts";
 import {
   buildTailscaleHttpsBaseUrl,
   probeTailscaleHttpsEndpoint,
@@ -17,6 +17,7 @@ import * as NodeOS from "node:os";
 import { isTailnetHost } from "@t3tools/shared/hostClassification";
 
 import * as ServerConfig from "../config.ts";
+import * as TailscaleAccess from "./TailscaleAccess.ts";
 import {
   formatHostForUrl,
   isLoopbackHost,
@@ -33,7 +34,9 @@ const TAILSCALE_ENDPOINT_TIMEOUT = Duration.seconds(3);
 export class DirectEndpoints extends Context.Service<
   DirectEndpoints,
   {
-    readonly resolve: () => Effect.Effect<ReadonlyArray<ServerDirectEndpoint>>;
+    readonly resolve: (
+      environmentId?: EnvironmentId,
+    ) => Effect.Effect<ReadonlyArray<ServerDirectEndpoint>>;
   }
 >()("t3/environment/DirectEndpoints") {}
 
@@ -111,6 +114,7 @@ export const make = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const httpClient = yield* HttpClient.HttpClient;
+  const tailscaleAccess = yield* TailscaleAccess.TailscaleAccess;
   // Only the service default listens on every interface without being asked,
   // so only it checks once whether it runs in a cloud. The check starts now so
   // the first client does not wait for its timeout.
@@ -119,7 +123,7 @@ export const make = Effect.gen(function* () {
     : Effect.succeed(false);
   yield* Effect.forkDetach(onCloudVm);
 
-  const resolve = Effect.gen(function* () {
+  const resolve = Effect.fn("DirectEndpoints.resolve")(function* (environmentId?: EnvironmentId) {
     const endpoints = [
       ...resolveBoundEndpoints({
         host: config.host,
@@ -129,18 +133,20 @@ export const make = Effect.gen(function* () {
       }),
     ];
     // Serve setup can fail without stopping startup; advertise only after it answers as this server.
-    if (config.tailscaleServeEnabled) {
+    const tailscale = yield* tailscaleAccess.getState;
+    if (tailscale.enabled && tailscale.url !== null) {
       const servedUrl = yield* readTailscaleStatus.pipe(
         Effect.map((status) => status.magicDnsName),
         Effect.flatMap((magicDnsName) => {
           if (magicDnsName === null) return Effect.succeed(null);
           const httpBaseUrl = buildTailscaleHttpsBaseUrl({
             magicDnsName,
-            servePort: config.tailscaleServePort,
+            servePort: tailscale.port,
           });
-          return probeTailscaleHttpsEndpoint({ baseUrl: httpBaseUrl }).pipe(
-            Effect.map((reachable) => (reachable ? httpBaseUrl : null)),
-          );
+          return probeTailscaleHttpsEndpoint({
+            baseUrl: httpBaseUrl,
+            ...(environmentId ? { expectedEnvironmentId: environmentId } : {}),
+          }).pipe(Effect.map((reachable) => (reachable ? httpBaseUrl : null)));
         }),
         Effect.timeoutOption(TAILSCALE_ENDPOINT_TIMEOUT),
         Effect.map(Option.flatMap(Option.fromNullishOr)),
@@ -155,11 +161,7 @@ export const make = Effect.gen(function* () {
     return endpoints;
   });
 
-  return DirectEndpoints.of({
-    resolve: Effect.fn("DirectEndpoints.resolve")(function () {
-      return resolve;
-    }),
-  });
+  return DirectEndpoints.of({ resolve });
 });
 
 export const layer = Layer.effect(DirectEndpoints, make);

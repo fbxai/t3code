@@ -145,8 +145,18 @@ Mobile keeps its manual environment selection.
 
 ### Tailscale HTTPS
 
-Join both devices to the same tailnet. In the desktop app, enable **Tailscale
-HTTPS** in **Settings → Sharing & access**. Turn it off there to remove that route.
+Join both devices to the same tailnet. On web or desktop, open **Settings →
+Environments**, expand an environment's **Routes**, and enable **Tailscale HTTPS**.
+For the desktop's own environment, the control is also under **Sharing & access**.
+Tailscale must be installed and signed in on the selected host. If the control asks
+for an update, update that environment's server first.
+
+Each environment has its own setting and HTTPS port. Network access can stay off,
+and existing SSH routes remain available. To use HTTPS from this client, choose
+**Add route** and add the address shown by the control. Use the route order to
+choose which connection to prefer. Turn off HTTPS in the same place to remove its mapping;
+clients using that route may disconnect. These settings require environment
+maintenance permission.
 
 To start a command-line server with Tailscale HTTPS:
 

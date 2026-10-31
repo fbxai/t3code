@@ -1251,6 +1251,11 @@ export function createServerEnvironmentAtoms<R, E>(
       label: "environment-data:server:trace-diagnostics",
       tag: WS_METHODS.serverGetTraceDiagnostics,
     }),
+    configureTailscale: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:configure-tailscale",
+      tag: WS_METHODS.serverConfigureTailscale,
+      concurrency: { mode: "singleFlight", key: ({ environmentId }) => environmentId },
+    }),
     processDiagnostics: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:server:process-diagnostics",
       tag: WS_METHODS.serverGetProcessDiagnostics,

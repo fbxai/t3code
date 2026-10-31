@@ -34,6 +34,7 @@ import type { EnvironmentPresentation } from "~/state/environments";
 import { usePreparedConnection } from "~/state/session";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { Button } from "../ui/button";
+import { EnvironmentTailscaleAccess } from "./EnvironmentTailscaleAccess";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
 export function EnvironmentRoutesList({
@@ -122,6 +123,10 @@ export function EnvironmentRoutesList({
           Add route
         </Button>
       </div>
+      <EnvironmentTailscaleAccess
+        environmentId={environment.environmentId}
+        label={environment.label}
+      />
     </div>
   );
 }

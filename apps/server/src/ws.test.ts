@@ -44,6 +44,7 @@ import * as CodexInstallation from "./provider/CodexInstallation.ts";
 import * as DeviceService from "./device/DeviceService.ts";
 import * as DocumentText from "./provider/DocumentText.ts";
 import * as DirectEndpoints from "./environment/DirectEndpoints.ts";
+import * as TailscaleAccess from "./environment/TailscaleAccess.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import * as EnvironmentTheme from "./environmentTheme.ts";
 import * as GitWorkflowService from "./git/GitWorkflowService.ts";
@@ -601,6 +602,10 @@ it.effect(
           resolveTargets: () => Effect.succeed([]),
         }),
         Layer.mock(DirectEndpoints.DirectEndpoints)({ resolve: () => Effect.succeed([]) }),
+        Layer.mock(TailscaleAccess.TailscaleAccess)({
+          getState: Effect.succeed({ enabled: false, port: 443, url: null, error: null }),
+          subscribeChanges: Effect.succeed(Stream.empty),
+        }),
         Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
           scratchRoot: Effect.succeedNone,
           namedProjectsRoot: process.cwd(),
@@ -778,6 +783,10 @@ it.effect("on-demand clients get provider config without workspace snapshots", (
         resolveTargets: () => Effect.succeed([]),
       }),
       Layer.mock(DirectEndpoints.DirectEndpoints)({ resolve: () => Effect.succeed([]) }),
+      Layer.mock(TailscaleAccess.TailscaleAccess)({
+        getState: Effect.succeed({ enabled: false, port: 443, url: null, error: null }),
+        subscribeChanges: Effect.succeed(Stream.empty),
+      }),
       Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
         scratchRoot: Effect.succeedNone,
         namedProjectsRoot: process.cwd(),

@@ -24,7 +24,7 @@ depends = ["install:deps"]
 run = "vp run dev:desktop"
 
 [tasks.build]
-description = "Build a local macOS ARM64 desktop release"
+description = "Build a local macOS ARM64 desktop release (Docker required for Linux SSH runtimes)"
 depends = ["check:code"]
 run = "mise exec node@26.12.1 zig@0.15.2 -- node scripts/build-local-desktop.ts"
 

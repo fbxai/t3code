@@ -220,6 +220,7 @@ import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolve
 import * as WorktreeSetupTracker from "./project/WorktreeSetupTracker.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as DirectEndpoints from "./environment/DirectEndpoints.ts";
+import * as TailscaleAccess from "./environment/TailscaleAccess.ts";
 import * as RemoteOpenTargets from "./environment/RemoteOpenTargets.ts";
 import * as DefectReporter from "./observability/DefectReporter.ts";
 import * as EventLoopMonitor from "./observability/EventLoopMonitor.ts";
@@ -1312,6 +1313,7 @@ export const layerWsRpc = (
       const externalLauncher = yield* ExternalLauncher.ExternalLauncher;
       const remoteOpenTargets = yield* RemoteOpenTargets.RemoteOpenTargets;
       const directEndpoints = yield* DirectEndpoints.DirectEndpoints;
+      const tailscaleAccess = yield* TailscaleAccess.TailscaleAccess;
       const gitWorkflow = yield* GitWorkflowService.GitWorkflowService;
       const review = yield* ReviewService.ReviewService;
       const vcsProvisioning = yield* VcsProvisioningService.VcsProvisioningService;
@@ -1735,6 +1737,7 @@ export const layerWsRpc = (
           yield* serverSettings.getSettings,
         );
         const environment = yield* serverEnvironment.getDescriptor;
+        const tailscaleHttps = yield* tailscaleAccess.getState;
         const auth = yield* serverAuth.getDescriptor();
         const scratchWorkspaceRoot = yield* managedFolders.scratchRoot;
         const lastEventLoopStall = yield* eventLoopMonitor.latestNoticeableStall;
@@ -1755,7 +1758,10 @@ export const layerWsRpc = (
           remoteOpenTargets: yield* resolveAvailableEditorsForConfig(
             remoteOpenTargets.resolveTargets(),
           ),
-          directEndpoints: yield* resolveAvailableEditorsForConfig(directEndpoints.resolve()),
+          directEndpoints: yield* resolveAvailableEditorsForConfig(
+            directEndpoints.resolve(environment.environmentId),
+          ),
+          tailscaleHttps,
           observability: {
             logsDirectoryPath: config.logsDir,
             localTracingEnabled: true,
@@ -2177,6 +2183,7 @@ export const layerWsRpc = (
         [WS_METHODS.serverProbe]: (_input) => Effect.succeed({}),
         [WS_METHODS.serverGetConfig]: (_input) =>
           loadServerConfig({ usageLimitsCommand: false, workspaceSnapshotsOnDemand: false }),
+        [WS_METHODS.serverConfigureTailscale]: (input) => tailscaleAccess.configure(input),
         [WS_METHODS.serverSearchAcpRegistry]: (input) =>
           acpRegistryCatalog
             .search(input)
@@ -3097,6 +3104,7 @@ export const layerWsRpc = (
               // Buffer changes through discovery and the initial snapshot's RPC ACK wait.
               const keybindingsChanges = yield* keybindings.subscribeChanges;
               const settingsChanges = yield* serverSettings.subscribeChanges;
+              const tailscaleChanges = yield* tailscaleAccess.subscribeChanges;
               const config = yield* loadServerConfig({
                 usageLimitsCommand,
                 workspaceSnapshotsOnDemand,
@@ -3176,7 +3184,19 @@ export const layerWsRpc = (
               );
 
               const liveUpdates = Stream.merge(
-                keybindingsUpdates,
+                Stream.merge(
+                  keybindingsUpdates,
+                  tailscaleChanges.pipe(
+                    Stream.mapEffect(() =>
+                      loadServerConfig({ usageLimitsCommand, workspaceSnapshotsOnDemand }),
+                    ),
+                    Stream.map((next) => ({
+                      version: 1 as const,
+                      type: "snapshot" as const,
+                      config: next,
+                    })),
+                  ),
+                ),
                 Stream.merge(
                   providerStatuses,
                   Stream.merge(

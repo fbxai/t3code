@@ -7,6 +7,8 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import serverPackage from "../apps/server/package.json" with { type: "json" };
+import rootPackage from "../package.json" with { type: "json" };
+import { releasePackageFiles } from "./update-release-package-versions.ts";
 
 const root = NodePath.resolve(import.meta.dirname, "..");
 const run = (command: string, args: string[], env = process.env) =>
@@ -50,12 +52,18 @@ if (import.meta.main) {
   const rustc = NodeChildProcess.execFileSync("rustup", ["which", "rustc"], {
     encoding: "utf8",
   }).trim();
+  run("docker", ["info", "--format", "{{.OSType}}/{{.Architecture}}"]);
   const version = localDesktopVersion(serverPackage.version, new Date());
+  const manifests = releasePackageFiles.map((file) => {
+    const path = NodePath.join(root, file);
+    return [path, NodeFS.readFileSync(path)] as const;
+  });
   const stage = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-local-ssh-"));
   const archives = NodePath.join(stage, "archives");
   NodeFS.mkdirSync(archives);
   try {
-    run("vp", ["run", "build:desktop"]);
+    run("node", ["scripts/update-release-package-versions.ts", version]);
+    run("vp", ["run", "build:desktop"], { ...process.env, APP_VERSION: version });
     for (const [platform, arch, target, zigTarget] of [
       ["mac", "arm64", "aarch64-apple-darwin", ""],
       ["linux", "x64", "x86_64-unknown-linux-gnu", "x86_64-linux-gnu.2.28"],
@@ -85,12 +93,51 @@ if (import.meta.main) {
             : {}),
         },
       );
-      run("node", [
-        "apps/server/scripts/cli.ts",
-        "build-exe",
-        "--target",
-        `${platform === "mac" ? "darwin" : platform}-${arch}`,
-      ]);
+      if (platform === "linux" && arch === "arm64") {
+        // Upstream's ARM64 SEA injection needs Linux Node to preserve 16/64 KiB page support.
+        run("vp", ["run", "--filter", "t3", "build:bundle"], {
+          ...process.env,
+          T3CODE_PACK_EXE: "bundle",
+          T3CODE_PACK_EXE_TARGET: "",
+        });
+        run("docker", [
+          "run",
+          "--rm",
+          "--platform",
+          "linux/arm64",
+          "--mount",
+          `type=bind,src=${root},dst=/work,readonly`,
+          "--mount",
+          `type=bind,src=${NodePath.join(root, "apps/server/dist-exe")},dst=/work/apps/server/dist-exe`,
+          "--workdir",
+          "/work/scripts",
+          `node:${rootPackage.engines.node}-bookworm-slim`,
+          "node",
+          "--input-type=module",
+          "--eval",
+          `
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Effect from "effect/Effect";
+import { readFileSync } from "node:fs";
+import { injectLinuxArm64Sea, assertLinuxArm64PageCompatibility } from "./lib/linux-arm64-sea.ts";
+const outputPath = "/work/apps/server/dist-exe/t3-linux-arm64";
+await Effect.runPromise(injectLinuxArm64Sea({
+  bundlePath: "/work/apps/server/dist-exe/bin.mjs",
+  outputPath,
+  nodeVersion: ${JSON.stringify(rootPackage.engines.node)},
+  verbose: true,
+}).pipe(Effect.provide(NodeServices.layer)));
+assertLinuxArm64PageCompatibility(readFileSync(outputPath));
+`,
+        ]);
+      } else {
+        run("node", [
+          "apps/server/scripts/cli.ts",
+          "build-exe",
+          "--target",
+          `${platform === "mac" ? "darwin" : platform}-${arch}`,
+        ]);
+      }
       const monitor = NodePath.join(stage, `monitor-${target}`);
       NodeFS.mkdirSync(monitor);
       NodeFS.copyFileSync(
@@ -102,7 +149,7 @@ if (import.meta.main) {
         ),
         NodePath.join(monitor, "t3-resource-monitor"),
       );
-      run("node", [
+      const archiveArgs = [
         "scripts/build-cli-archive.ts",
         "--platform",
         platform,
@@ -111,10 +158,46 @@ if (import.meta.main) {
         "--version",
         version,
         "--output-dir",
-        archives,
+        platform === "linux" ? "/stage/archives" : archives,
         "--resource-monitor-dir",
-        monitor,
-      ]);
+        platform === "linux" ? `/stage/monitor-${target}` : monitor,
+      ];
+      if (platform === "linux") {
+        // Upstream archives bundle libatomic and patch RUNPATH on an Ubuntu build host.
+        const image = `t3code-local-archive:${rootPackage.engines.node}-${arch}`;
+        const dockerPlatform = `linux/${arch === "x64" ? "amd64" : "arm64"}`;
+        run("docker", [
+          "build",
+          "--platform",
+          dockerPlatform,
+          "--build-arg",
+          `NODE_VERSION=${rootPackage.engines.node}`,
+          "--build-arg",
+          `PNPM_VERSION=${rootPackage.packageManager.split("@").at(-1)}`,
+          "--tag",
+          image,
+          "--file",
+          "scripts/docker/local-desktop-linux.Dockerfile",
+          "scripts/docker",
+        ]);
+        run("docker", [
+          "run",
+          "--rm",
+          "--platform",
+          dockerPlatform,
+          "--mount",
+          `type=bind,src=${root},dst=/work,readonly`,
+          "--mount",
+          `type=bind,src=${stage},dst=/stage`,
+          "--workdir",
+          "/work",
+          image,
+          "node",
+          ...archiveArgs,
+        ]);
+      } else {
+        run("node", archiveArgs);
+      }
     }
     const checksums = ["darwin-arm64", "linux-x64", "linux-arm64"].map((platform) => {
       const file = `t3-${version}-${platform}.tar.gz`;
@@ -128,6 +211,7 @@ if (import.meta.main) {
       T3CODE_DESKTOP_SSH_RUNTIMES: archives,
     });
   } finally {
+    for (const [path, contents] of manifests) NodeFS.writeFileSync(path, contents);
     NodeFS.rmSync(stage, { recursive: true, force: true });
   }
 }

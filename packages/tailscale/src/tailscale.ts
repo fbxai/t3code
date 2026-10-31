@@ -222,7 +222,7 @@ export const parseTailscaleStatus = (
   );
 
 const readTailscaleOutput = Effect.fn("tailscale.readTailscaleOutput")(function* (
-  subcommand: "status" | "debug",
+  subcommand: "status" | "debug" | "serve",
   args: readonly string[],
 ) {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -286,6 +286,34 @@ const readTailscaleOutput = Effect.fn("tailscale.readTailscaleOutput")(function*
 
 export const readTailscaleStatus = readTailscaleOutput("status", ["status", "--json"]).pipe(
   Effect.flatMap(parseTailscaleStatus),
+);
+
+const decodeServeConfig = Schema.decodeEffect(
+  Schema.fromJsonString(
+    Schema.Struct({
+      TCP: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
+      Web: Schema.optionalKey(
+        Schema.Record(
+          Schema.String,
+          Schema.Struct({
+            Handlers: Schema.Record(
+              Schema.String,
+              Schema.Struct({ Proxy: Schema.optionalKey(Schema.String) }),
+            ),
+          }),
+        ),
+      ),
+    }),
+  ),
+);
+
+export const readTailscaleServeConfig = readTailscaleOutput("serve", [
+  "serve",
+  "status",
+  "--json",
+]).pipe(
+  Effect.flatMap(decodeServeConfig),
+  Effect.mapError((cause) => new TailscaleStatusParseError({ cause })),
 );
 
 const TailscaleExitNodeJson = Schema.Struct({
@@ -450,8 +478,16 @@ export const disableTailscaleServe = Effect.fn("tailscale.disableTailscaleServe"
   );
 });
 
+const decodeProbeEnvironment = Schema.decodeUnknownEffect(
+  Schema.Struct({ environmentId: Schema.String }),
+);
+
 export const probeTailscaleHttpsEndpoint = Effect.fn("tailscale.probeTailscaleHttpsEndpoint")(
-  function* (input: { readonly baseUrl: string; readonly timeout?: Duration.Input }) {
+  function* (input: {
+    readonly baseUrl: string;
+    readonly timeout?: Duration.Input;
+    readonly expectedEnvironmentId?: string;
+  }) {
     const client = yield* HttpClient.HttpClient;
     const response = yield* Effect.gen(function* () {
       const url = new URL("/.well-known/t3/environment", input.baseUrl);
@@ -459,10 +495,11 @@ export const probeTailscaleHttpsEndpoint = Effect.fn("tailscale.probeTailscaleHt
       return yield* client.execute(request);
     }).pipe(Effect.timeoutOption(input.timeout ?? TAILSCALE_PROBE_TIMEOUT));
 
-    return Option.match(response, {
-      onNone: () => false,
-      onSome: (httpResponse) => httpResponse.status >= 200 && httpResponse.status < 300,
-    });
+    if (Option.isNone(response) || response.value.status < 200 || response.value.status >= 300)
+      return false;
+    if (input.expectedEnvironmentId === undefined) return true;
+    const descriptor = yield* response.value.json.pipe(Effect.flatMap(decodeProbeEnvironment));
+    return descriptor.environmentId === input.expectedEnvironmentId;
   },
   Effect.orElseSucceed(() => false),
 );
